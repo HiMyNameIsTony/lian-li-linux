@@ -150,7 +150,13 @@ pub fn prepare_media_asset(
                 .ok_or_else(|| {
                     MediaError::InvalidConfig(format!("unknown template id '{template_id}'"))
                 })?;
-            let asset = CustomAsset::new(&template, cfg.orientation, screen, all_sensors)?;
+            let asset = CustomAsset::new(
+                &template,
+                cfg.orientation,
+                screen,
+                all_sensors,
+                cfg.smooth_edges(),
+            )?;
             Ok(MediaAssetKind::Custom { asset })
         }
     }

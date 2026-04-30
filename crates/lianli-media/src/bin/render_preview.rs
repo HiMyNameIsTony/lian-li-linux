@@ -72,7 +72,7 @@ fn main() -> Result<()> {
         h264: false,
     };
 
-    let asset = CustomAsset::new(&template, 0.0, &screen, &[])
+    let asset = CustomAsset::new(&template, 0.0, &screen, &[], false)
         .map_err(|e| anyhow!("building custom asset: {e}"))?;
     asset.seed_preview_history();
     let frame = asset

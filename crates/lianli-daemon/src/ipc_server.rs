@@ -464,7 +464,7 @@ fn handle_request(
                 h264: false,
             };
             let all_sensors = lianli_shared::sensors::enumerate_sensors();
-            match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors) {
+            match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false) {
                 Ok(asset) => {
                     asset.seed_preview_history();
                     match asset.render_frame(true) {

@@ -61,6 +61,7 @@ pub struct CustomAsset {
     canonical_height: u32,
     fonts: HashMap<PathBuf, Font<'static>>,
     default_font: Font<'static>,
+    smooth_edges: bool,
     frame_index: AtomicUsize,
     start_instant: Instant,
 }
@@ -82,6 +83,7 @@ impl CustomAsset {
         orientation: f32,
         screen: &ScreenInfo,
         all_sensors: &[SensorInfo],
+        smooth_edges: bool,
     ) -> Result<Arc<Self>, MediaError> {
         let default_path = default_font_path().ok_or_else(|| {
             MediaError::Sensor("no system font available; install fontconfig or DejaVu Sans".into())
@@ -222,6 +224,7 @@ impl CustomAsset {
             canonical_height: canvas_h,
             fonts,
             default_font,
+            smooth_edges,
             frame_index: AtomicUsize::new(1),
             start_instant: Instant::now(),
         }))
@@ -382,6 +385,7 @@ impl CustomAsset {
                 &self.fonts,
                 &self.default_font,
                 ElapsedMs::from(elapsed_ms),
+                self.smooth_edges,
             );
         }
         drop(states);

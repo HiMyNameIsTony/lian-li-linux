@@ -61,6 +61,7 @@ export struct LcdEntryData {
     template-id: string,
     template-name: string,
     template-preview: image,
+    smooth-edges: bool,
 }
 
 component OrientationButton inherits Rectangle {
@@ -601,6 +602,17 @@ component LcdConfigCard inherits Card {
                         active: root.lcd.orientation == 270;
                         clicked => { root.update-field(root.index, "orientation", "270"); }
                     }
+                }
+            }
+        }
+
+        if root.lcd.media-type == "Custom": HorizontalLayout {
+            spacing: 8px;
+            CheckBox {
+                text: "Smooth edges (uses more CPU)";
+                checked: root.lcd.smooth-edges;
+                toggled => {
+                    root.update-field(root.index, "smooth_edges", self.checked ? "true" : "false");
                 }
             }
         }

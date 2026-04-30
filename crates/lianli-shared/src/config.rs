@@ -37,9 +37,15 @@ pub struct LcdConfig {
     pub doublegauge: Option<DoublegaugeDescriptor>,
     #[serde(default)]
     pub template_id: Option<String>,
+    #[serde(default)]
+    pub smooth_edges: Option<bool>,
 }
 
 impl LcdConfig {
+    pub fn smooth_edges(&self) -> bool {
+        self.smooth_edges.unwrap_or(false)
+    }
+
     pub fn device_id(&self) -> String {
         if let Some(serial) = &self.serial {
             format!("serial:{serial}")

@@ -77,25 +77,23 @@ pub(super) fn draw_widget(
     fonts: &HashMap<PathBuf, Font<'static>>,
     default_font: &Font<'static>,
     elapsed_ms: ElapsedMs,
+    smooth_edges: bool,
 ) {
     let (ww, wh) = widget_size_px(widget, uniform_scale);
     if ww == 0 || wh == 0 {
         return;
     }
 
-    let ss_factor: u32 = match &widget.kind {
+    let supersamples = match &widget.kind {
         WidgetKind::RadialGauge { .. }
         | WidgetKind::Speedometer { .. }
         | WidgetKind::Sparkline { .. }
-        | WidgetKind::ClockAnalog { .. } => 2,
+        | WidgetKind::ClockAnalog { .. } => true,
         WidgetKind::VerticalBar { corner_radius, .. }
-        | WidgetKind::HorizontalBar { corner_radius, .. }
-            if *corner_radius > 0.1 =>
-        {
-            2
-        }
-        _ => 1,
+        | WidgetKind::HorizontalBar { corner_radius, .. } => *corner_radius > 0.1,
+        _ => false,
     };
+    let ss_factor: u32 = if smooth_edges && supersamples { 2 } else { 1 };
     let ss = ss_factor as f32;
     let draw_w = ww * ss_factor;
     let draw_h = wh * ss_factor;

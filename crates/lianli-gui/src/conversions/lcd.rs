@@ -116,6 +116,7 @@ pub fn lcd_to_slint(
         template_id: SharedString::from(lcd.template_id.as_deref().unwrap_or("")),
         template_name: SharedString::default(),
         template_preview: slint::Image::default(),
+        smooth_edges: lcd.smooth_edges(),
     }
 }
 
