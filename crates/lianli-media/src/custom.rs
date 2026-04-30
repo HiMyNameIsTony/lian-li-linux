@@ -16,7 +16,7 @@ use helpers::{
     widget_sensor_source, widget_size_px, ElapsedMs,
 };
 use image::imageops::FilterType;
-use image::{imageops, DynamicImage, ImageBuffer, Rgb, Rgba, RgbaImage};
+use image::{imageops, ImageBuffer, Rgb, RgbImage, Rgba, RgbaImage};
 use imageproc::drawing::draw_filled_rect_mut;
 use imageproc::rect::Rect;
 use lianli_shared::fonts::default_font_path;
@@ -33,6 +33,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 use widgets::{draw_widget, WidgetState};
+
+fn rgba_to_rgb(src: &RgbaImage) -> RgbImage {
+    let (w, h) = (src.width(), src.height());
+    let mut out = Vec::with_capacity((w * h * 3) as usize);
+    for px in src.as_raw().chunks_exact(4) {
+        out.extend_from_slice(&px[..3]);
+    }
+    ImageBuffer::from_raw(w, h, out).expect("rgb buffer dims match")
+}
 
 fn default_sample_interval(kind: &WidgetKind, explicit_ms: Option<u64>) -> Duration {
     let default_ms = match kind {
@@ -51,6 +60,7 @@ pub struct CustomAsset {
     template: LcdTemplate,
     widget_states: Mutex<Vec<WidgetState>>,
     template_image: RgbaImage,
+    scratch: Mutex<RgbaImage>,
     screen: ScreenInfo,
     orientation: f32,
     update_interval: Duration,
@@ -210,10 +220,12 @@ impl CustomAsset {
         let frame_interval =
             Duration::from_nanos(1_000_000_000 / fps as u64).max(Duration::from_millis(16));
 
+        let scratch = composite.clone();
         Ok(Arc::new(Self {
             template: template.clone(),
             widget_states: Mutex::new(widget_states),
             template_image: composite,
+            scratch: Mutex::new(scratch),
             screen: *screen,
             orientation,
             update_interval: frame_interval,
@@ -370,13 +382,16 @@ impl CustomAsset {
             return Ok(None);
         }
 
-        let mut frame = self.template_image.clone();
+        let mut scratch = self.scratch.lock();
+        scratch
+            .as_mut()
+            .copy_from_slice(self.template_image.as_raw());
         for (widget, state) in self.template.widgets.iter().zip(states.iter_mut()) {
             if !widget.visible {
                 continue;
             }
             draw_widget(
-                &mut frame,
+                &mut scratch,
                 widget,
                 state,
                 self.uniform_scale,
@@ -390,7 +405,8 @@ impl CustomAsset {
         }
         drop(states);
 
-        let rgb = DynamicImage::ImageRgba8(frame).to_rgb8();
+        let rgb = rgba_to_rgb(&scratch);
+        drop(scratch);
         let oriented = apply_orientation(rgb, self.orientation);
         let jpeg = encode_jpeg(oriented, &self.screen)?;
 
