@@ -285,8 +285,8 @@ pub fn fast_overlay(dst: &mut RgbaImage, src: &RgbaImage, tl_x: i64, tl_y: i64) 
 
     for dy in dy0..dy1 {
         let sy = (dy - tl_y) as usize;
-        let dst_row = &mut dst_buf
-            [dy as usize * dst_stride + dst_x0_bytes..dy as usize * dst_stride + dst_x0_bytes + row_bytes];
+        let dst_row = &mut dst_buf[dy as usize * dst_stride + dst_x0_bytes
+            ..dy as usize * dst_stride + dst_x0_bytes + row_bytes];
         let src_row =
             &src_buf[sy * src_stride + src_x0_bytes..sy * src_stride + src_x0_bytes + row_bytes];
 

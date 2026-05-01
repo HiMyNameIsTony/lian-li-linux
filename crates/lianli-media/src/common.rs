@@ -40,15 +40,41 @@ pub fn encode_jpeg(image: RgbImage, screen: &ScreenInfo) -> Result<Vec<u8>, Medi
     encode_compressed(tj_image, screen)
 }
 
-pub fn encode_jpeg_rgba(image: RgbaImage, screen: &ScreenInfo) -> Result<Vec<u8>, MediaError> {
-    let final_image = apply_device_rotation_rgba(image, screen.device_rotation);
-    let width = final_image.width() as usize;
-    let height = final_image.height() as usize;
+pub fn encode_jpeg_rgba(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    orientation: f32,
+    screen: &ScreenInfo,
+) -> Result<Vec<u8>, MediaError> {
+    let orientation_q =
+        (((((orientation % 360.0) + 360.0) % 360.0 + 45.0) / 90.0).floor() as i32 & 3) * 90;
+    let total_rot = ((orientation_q + screen.device_rotation as i32).rem_euclid(360)) as u16;
+
+    if total_rot == 0 {
+        let tj_image = turbojpeg::Image {
+            pixels: rgba,
+            width: width as usize,
+            pitch: width as usize * 4,
+            height: height as usize,
+            format: turbojpeg::PixelFormat::RGBA,
+        };
+        return encode_compressed(tj_image, screen);
+    }
+
+    let img = RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| MediaError::ImageError("rgba bytes don't match dimensions".into()))?;
+    let rotated = match total_rot {
+        90 => rotate90(&img),
+        180 => rotate180(&img),
+        270 => rotate270(&img),
+        _ => img,
+    };
     let tj_image = turbojpeg::Image {
-        pixels: final_image.as_raw().as_slice(),
-        width,
-        pitch: width * 4,
-        height,
+        pixels: rotated.as_raw().as_slice(),
+        width: rotated.width() as usize,
+        pitch: rotated.width() as usize * 4,
+        height: rotated.height() as usize,
         format: turbojpeg::PixelFormat::RGBA,
     };
     encode_compressed(tj_image, screen)
@@ -80,15 +106,6 @@ fn apply_device_rotation_rgb(image: RgbImage, rotation: u16) -> RgbImage {
     }
 }
 
-fn apply_device_rotation_rgba(image: RgbaImage, rotation: u16) -> RgbaImage {
-    match rotation {
-        90 => rotate90(&image),
-        180 => rotate180(&image),
-        270 => rotate270(&image),
-        _ => image,
-    }
-}
-
 pub fn render_dimensions(screen: &ScreenInfo, orientation: f32) -> (u32, u32) {
     let norm = ((orientation % 360.0) + 360.0) % 360.0;
     if (norm - 90.0).abs() < 1.0 || (norm - 270.0).abs() < 1.0 {
@@ -99,27 +116,6 @@ pub fn render_dimensions(screen: &ScreenInfo, orientation: f32) -> (u32, u32) {
 }
 
 pub fn apply_orientation(image: RgbImage, orientation: f32) -> RgbImage {
-    let norm = ((orientation % 360.0) + 360.0) % 360.0;
-    if (norm - 0.0).abs() < 0.5 || (norm - 360.0).abs() < 0.5 {
-        image
-    } else if (norm - 90.0).abs() < 0.5 {
-        rotate90(&image)
-    } else if (norm - 180.0).abs() < 0.5 {
-        rotate180(&image)
-    } else if (norm - 270.0).abs() < 0.5 {
-        rotate270(&image)
-    } else {
-        let nearest = ((norm + 45.0) / 90.0).floor() as i32 & 3;
-        match nearest {
-            1 => rotate90(&image),
-            2 => rotate180(&image),
-            3 => rotate270(&image),
-            _ => image,
-        }
-    }
-}
-
-pub fn apply_orientation_rgba(image: RgbaImage, orientation: f32) -> RgbaImage {
     let norm = ((orientation % 360.0) + 360.0) % 360.0;
     if (norm - 0.0).abs() < 0.5 || (norm - 360.0).abs() < 0.5 {
         image

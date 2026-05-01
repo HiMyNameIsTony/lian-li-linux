@@ -8,7 +8,7 @@
 mod helpers;
 mod widgets;
 
-use crate::common::{apply_orientation_rgba, encode_jpeg_rgba, render_dimensions, MediaError};
+use crate::common::{encode_jpeg_rgba, render_dimensions, MediaError};
 use crate::sensor::FrameInfo;
 use crate::video::decode_frames_to_rgba;
 use ab_glyph::FontVec;
@@ -280,24 +280,36 @@ impl CustomAsset {
             TemplateBackground::Image { .. } => Rgba([0, 0, 0, 255]),
         };
         let image = RgbaImage::from_pixel(self.canonical_width, self.canonical_height, fill);
-        let oriented = apply_orientation_rgba(image, self.orientation);
         FrameInfo {
-            data: encode_jpeg_rgba(oriented, &self.screen).unwrap_or_default(),
+            data: encode_jpeg_rgba(
+                image.as_raw(),
+                self.canonical_width,
+                self.canonical_height,
+                self.orientation,
+                &self.screen,
+            )
+            .unwrap_or_default(),
             frame_index: self.frame_index.fetch_add(1, Ordering::SeqCst),
         }
     }
 
     pub fn render_frame(&self, force: bool) -> Result<Option<FrameInfo>, MediaError> {
-        match self.render_frame_rgba(force)? {
+        let outcome = self.render_frame_rgba_with(force, |bytes| {
+            encode_jpeg_rgba(
+                bytes,
+                self.canonical_width,
+                self.canonical_height,
+                self.orientation,
+                &self.screen,
+            )
+        })?;
+        match outcome {
             None => Ok(None),
-            Some(canvas) => {
-                let oriented = apply_orientation_rgba(canvas, self.orientation);
-                let jpeg = encode_jpeg_rgba(oriented, &self.screen)?;
-                Ok(Some(FrameInfo {
-                    data: jpeg,
-                    frame_index: self.frame_index.fetch_add(1, Ordering::SeqCst),
-                }))
-            }
+            Some(Err(e)) => Err(e),
+            Some(Ok(jpeg)) => Ok(Some(FrameInfo {
+                data: jpeg,
+                frame_index: self.frame_index.fetch_add(1, Ordering::SeqCst),
+            })),
         }
     }
 
@@ -311,7 +323,16 @@ impl CustomAsset {
         combined as u16
     }
 
-    pub fn render_frame_rgba(&self, force: bool) -> Result<Option<RgbaImage>, MediaError> {
+    /// Render one frame and hand the raw RGBA bytes to `cb` while still holding the
+    /// scratch lock. Avoids a 3.7 MB clone per frame on the hot path. Returns
+    /// `Ok(None)` when nothing has changed since the last render and `force` is
+    /// false. The bytes are at `(canonical_width, canonical_height)` in the
+    /// pre-orientation logical layout — callers needing rotation must apply it.
+    pub fn render_frame_rgba_with<R>(
+        &self,
+        force: bool,
+        cb: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Option<R>, MediaError> {
         let now = Instant::now();
         let elapsed_ms = now
             .saturating_duration_since(self.start_instant)
@@ -447,8 +468,8 @@ impl CustomAsset {
         }
         drop(states);
 
-        let frame = scratch.clone();
+        let result = cb(scratch.as_raw());
         drop(scratch);
-        Ok(Some(frame))
+        Ok(Some(result))
     }
 }

@@ -61,6 +61,45 @@ impl Ene6k77Model {
             4
         }
     }
+
+    pub fn palette_size(&self) -> usize {
+        match self {
+            Self::AlV2Fan => 6,
+            _ => 4,
+        }
+    }
+
+    pub fn single_ring_leds_per_fan(&self) -> usize {
+        match self {
+            Self::SlFan | Self::SlV2Fan | Self::SlV2aFan | Self::SlRedragon => 16,
+            _ => 0,
+        }
+    }
+
+    pub fn inner_leds_per_fan(&self) -> usize {
+        if self.uses_double_port() {
+            8
+        } else {
+            0
+        }
+    }
+
+    pub fn outer_leds_per_fan(&self) -> usize {
+        if self.uses_double_port() {
+            12
+        } else {
+            0
+        }
+    }
+
+    /// Frame commit value for `[REPORT_ID, 0x60, hi, lo]`. SLV2/SLV2A use 4;
+    /// every other variant uses 1.
+    pub fn frame_commit_value(&self) -> u16 {
+        match self {
+            Self::SlV2Fan | Self::SlV2aFan => 4,
+            _ => 1,
+        }
+    }
 }
 
 /// Firmware version info read from the device.
