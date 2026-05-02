@@ -5,7 +5,7 @@ mod text;
 use crate::common::{apply_orientation, encode_jpeg, render_dimensions, MediaError};
 use ab_glyph::FontVec;
 use gauge::{draw_gauge, GaugeParams};
-use image::{ImageBuffer, Rgb, RgbImage};
+use image::{ImageBuffer, Rgb, RgbImage, RgbaImage};
 use lianli_shared::media::{SensorDescriptor, SensorRange, SensorSourceConfig};
 use lianli_shared::screen::ScreenInfo;
 use lianli_shared::sensors::SensorInfo;
@@ -279,6 +279,76 @@ impl SensorAsset {
             data,
             frame_index: self.frame_index.fetch_add(1, Ordering::SeqCst),
         }))
+    }
+
+    pub fn render_frame_rgba(&self, force: bool) -> Result<Option<RgbaImage>, MediaError> {
+        let value = self.read_value()?.clamp(0.0, 100.0);
+
+        let value_text = if self.decimal_places > 0 {
+            format!("{:.prec$}", value, prec = self.decimal_places as usize)
+        } else {
+            format!("{:.0}", value.round())
+        };
+
+        let mut prev = self.previous_value.lock();
+        if value_text == *prev && !force {
+            return Ok(None);
+        }
+
+        let gauge_color = self.color_for_value(value);
+        let w = self.render_width;
+        let h = self.render_height;
+
+        let mut image = match &self.template_image {
+            Some(tpl) => (**tpl).clone(),
+            None => ImageBuffer::from_pixel(w, h, Rgb(self.background_color)),
+        };
+
+        draw_gauge(
+            &mut image,
+            w,
+            h,
+            GaugeParams {
+                value,
+                gauge_color,
+                ring_color: self.gauge_background_color,
+                outer_radius: self.gauge_outer_radius,
+                thickness: self.gauge_thickness,
+                start_angle: self.gauge_start_angle,
+                sweep_angle: self.gauge_sweep_angle,
+                corner_radius: self.bar_corner_radius,
+            },
+        );
+
+        let text_params = TextRenderParams {
+            label: &self.label,
+            unit: &self.unit,
+            color: self.text_color,
+            value_size: self.value_font_size,
+            unit_size: self.unit_font_size,
+            label_size: self.label_font_size,
+            value_offset: self.value_offset,
+            unit_offset: self.unit_offset,
+            label_offset: self.label_offset,
+            value_text: &value_text,
+        };
+
+        if let Some(font) = &self.font {
+            draw_sensor_text_ttf(&mut image, w, h, text_params, font);
+        } else {
+            draw_sensor_text_fallback(&mut image, w, h, text_params);
+        }
+
+        *prev = value_text;
+
+        let oriented = apply_orientation(image, self.orientation);
+        let (ow, oh) = oriented.dimensions();
+        let mut rgba = RgbaImage::new(ow, oh);
+        for (src, dst) in oriented.pixels().zip(rgba.pixels_mut()) {
+            *dst = image::Rgba([src[0], src[1], src[2], 255]);
+        }
+        self.frame_index.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(rgba))
     }
 
     pub fn blank_frame(&self) -> FrameInfo {

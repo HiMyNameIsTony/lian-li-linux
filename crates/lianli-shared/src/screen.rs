@@ -41,7 +41,7 @@ impl ScreenInfo {
         jpeg_quality: 85,
         max_payload: 153_600,
         device_rotation: 0,
-        h264: false,
+        h264: true,
     };
 
     pub const HYDROSHIFT2: Self = Self {

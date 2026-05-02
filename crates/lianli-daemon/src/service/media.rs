@@ -254,7 +254,9 @@ impl ServiceManager {
                                 candidate.pid,
                                 Arc::clone(backend),
                             ) {
-                                Some(result) => result.map(LcdBackend::HidLcd),
+                                Some(result) => result.map(|d| {
+                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                }),
                                 None => Err(anyhow::anyhow!("Not an LCD device")),
                             }
                         } else if self.use_rusb() {
@@ -271,32 +273,35 @@ impl ServiceManager {
                                 hid_usage_page: None,
                             };
                             match open_hid_lcd_device_rusb(&det) {
-                                Some(result) => result.map(LcdBackend::HidLcd),
+                                Some(result) => result.map(|d| {
+                                    LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d)))
+                                }),
                                 None => Err(anyhow::anyhow!("Not an LCD device")),
                             }
                         } else {
                             open_hid_lcd_by_vid_pid(candidate.vid, candidate.pid, candidate.family)
-                                .map(LcdBackend::HidLcd)
+                                .map(|d| LcdBackend::HidLcd(Arc::new(parking_lot::Mutex::new(d))))
                         }
                     }
                     _ => unreachable!(),
                 };
 
                 match backend_result {
-                    Ok(mut lcd) => {
+                    Ok(lcd) => {
                         info!(
                             "[devices] LCD[{}] attached (serial: {}, orientation: {:.0}°)",
                             device_cfg.device_id(),
                             candidate.device_id,
                             device_cfg.orientation
                         );
-                        if let LcdBackend::HidLcd(ref mut hid) = lcd {
-                            hid.set_use_c_command(device_cfg.aio_512_frame());
+                        if let LcdBackend::HidLcd(ref hid) = lcd {
+                            let mut guard = hid.lock();
+                            guard.set_use_c_command(device_cfg.aio_512_frame());
                             self.aio_lcd_info.insert(
                                 candidate.device_id.clone(),
                                 (
-                                    hid.firmware_version_str().map(|s| s.to_string()),
-                                    hid.supports_c_command(),
+                                    guard.firmware_version_str().map(|s| s.to_string()),
+                                    guard.supports_c_command(),
                                 ),
                             );
                         }

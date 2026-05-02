@@ -30,6 +30,7 @@ pub(super) const CMD_RESET_DEVICE: u8 = 0x8E;
 
 // B-Commands
 pub(super) const CMD_LCD_CONTROL: u8 = 0x0C;
+pub(super) const CMD_SEND_H264: u8 = 0x0D;
 pub(super) const CMD_SEND_JPEG: u8 = 0x0E;
 pub(super) const CMD_LCD_AVAILABLE: u8 = 0x17;
 

@@ -1,9 +1,9 @@
 use super::protocol::{
     build_lcd_packet, duty_to_percent, parse_firmware_version, ACK_TIMEOUT_MS, A_HEADER_LEN,
     A_PACKET_SIZE, B_HEADER_LEN, B_MAX_PAYLOAD, B_PACKET_SIZE, CMD_GET_FIRMWARE, CMD_HANDSHAKE,
-    CMD_LCD_AVAILABLE, CMD_LCD_CONTROL, CMD_RESET_DEVICE, CMD_SEND_JPEG, CMD_SET_FAN_PWM,
-    CMD_SET_PUMP_PWM, C_MAX_PAYLOAD, C_PACKET_SIZE, INIT_READ_TIMEOUT_MS, READ_TIMEOUT_MS,
-    REPORT_ID_A, REPORT_ID_B, REPORT_ID_C,
+    CMD_LCD_AVAILABLE, CMD_LCD_CONTROL, CMD_RESET_DEVICE, CMD_SEND_H264, CMD_SEND_JPEG,
+    CMD_SET_FAN_PWM, CMD_SET_PUMP_PWM, C_MAX_PAYLOAD, C_PACKET_SIZE, INIT_READ_TIMEOUT_MS,
+    READ_TIMEOUT_MS, REPORT_ID_A, REPORT_ID_B, REPORT_ID_C,
 };
 use super::{AioHandshake, AioLcdVariant, LcdControlMode, ScreenRotation};
 use crate::traits::{AioDevice, FanDevice, LcdDevice};
@@ -11,6 +11,8 @@ use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
 use lianli_transport::HidBackend;
 use parking_lot::Mutex;
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -159,6 +161,25 @@ impl HydroShiftLcdController {
 
     pub fn send_jpeg(&self, jpeg_data: &[u8]) -> Result<()> {
         self.send_chunked(CMD_SEND_JPEG, jpeg_data)
+    }
+
+    pub fn send_h264_frame(&self, frame: &[u8]) -> Result<()> {
+        self.send_chunked(CMD_SEND_H264, frame)
+    }
+
+    pub fn stream_h264_reader(&self, reader: &mut dyn Read, stop: &AtomicBool) -> Result<()> {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let n = reader.read(&mut buf).context("AIO LCD: read h264 stream")?;
+            if n == 0 {
+                break;
+            }
+            self.send_h264_frame(&buf[..n])?;
+        }
+        Ok(())
     }
 
     pub fn variant(&self) -> AioLcdVariant {
@@ -559,5 +580,9 @@ impl LcdDevice for HydroShiftLcdController {
 
     fn set_use_c_command(&mut self, enable: bool) {
         HydroShiftLcdController::set_use_c_command(self, enable);
+    }
+
+    fn stream_h264_reader(&mut self, reader: &mut dyn Read, stop: &AtomicBool) -> Result<()> {
+        HydroShiftLcdController::stream_h264_reader(self, reader, stop)
     }
 }

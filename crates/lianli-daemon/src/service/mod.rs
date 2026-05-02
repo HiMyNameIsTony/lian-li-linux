@@ -209,8 +209,8 @@ impl ServiceManager {
         self.poll_tick = self.poll_tick.wrapping_add(1);
         if self.poll_tick % 2 == 0 {
             for target in self.targets.values_mut() {
-                if let LcdBackend::HidLcd(d) = &mut target.lcd {
-                    if let Err(e) = d.check_and_recover_lcd() {
+                if let LcdBackend::HidLcd(d) = &target.lcd {
+                    if let Err(e) = d.lock().check_and_recover_lcd() {
                         tracing::debug!("LCD[{}] health check error: {e:#}", target.index);
                     }
                 }

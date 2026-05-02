@@ -82,6 +82,13 @@ pub trait LcdDevice: Send + Sync {
         None
     }
     fn set_use_c_command(&mut self, _enable: bool) {}
+    fn stream_h264_reader(
+        &mut self,
+        _reader: &mut dyn std::io::Read,
+        _stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        anyhow::bail!("h264 streaming not supported by this device")
+    }
 }
 
 /// An AIO device with pump, fans, and optionally LCD.
