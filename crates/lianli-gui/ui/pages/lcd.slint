@@ -64,6 +64,8 @@ export struct LcdEntryData {
     smooth-edges: bool,
     custom-h264: bool,
     device-supports-h264: bool,
+    supports-c-command: bool,
+    aio-512-frame: bool,
 }
 
 component OrientationButton inherits Rectangle {
@@ -626,6 +628,17 @@ component LcdConfigCard inherits Card {
                 checked: root.lcd.custom-h264;
                 toggled => {
                     root.update-field(root.index, "custom_h264", self.checked ? "true" : "false");
+                }
+            }
+        }
+
+        if root.lcd.supports-c-command: HorizontalLayout {
+            spacing: 8px;
+            CheckBox {
+                text: "Use 512-byte HID frame mode";
+                checked: root.lcd.aio-512-frame;
+                toggled => {
+                    root.update-field(root.index, "aio_512_frame", self.checked ? "true" : "false");
                 }
             }
         }

@@ -1,9 +1,9 @@
 use super::protocol::{
-    build_lcd_packet, duty_to_percent, parse_firmware_version, A_HEADER_LEN, A_PACKET_SIZE,
-    B_HEADER_LEN, B_MAX_PAYLOAD, B_PACKET_SIZE, CMD_GET_FIRMWARE, CMD_HANDSHAKE, CMD_LCD_AVAILABLE,
-    CMD_LCD_CONTROL, CMD_RESET_DEVICE, CMD_SEND_JPEG, CMD_SET_FAN_PWM, CMD_SET_PUMP_PWM,
-    C_MAX_PAYLOAD, C_PACKET_SIZE, INIT_READ_TIMEOUT_MS, READ_TIMEOUT_MS, REPORT_ID_A, REPORT_ID_B,
-    REPORT_ID_C,
+    build_lcd_packet, duty_to_percent, parse_firmware_version, ACK_TIMEOUT_MS, A_HEADER_LEN,
+    A_PACKET_SIZE, B_HEADER_LEN, B_MAX_PAYLOAD, B_PACKET_SIZE, CMD_GET_FIRMWARE, CMD_HANDSHAKE,
+    CMD_LCD_AVAILABLE, CMD_LCD_CONTROL, CMD_RESET_DEVICE, CMD_SEND_JPEG, CMD_SET_FAN_PWM,
+    CMD_SET_PUMP_PWM, C_MAX_PAYLOAD, C_PACKET_SIZE, INIT_READ_TIMEOUT_MS, READ_TIMEOUT_MS,
+    REPORT_ID_A, REPORT_ID_B, REPORT_ID_C,
 };
 use super::{AioHandshake, AioLcdVariant, LcdControlMode, ScreenRotation};
 use crate::traits::{AioDevice, FanDevice, LcdDevice};
@@ -25,6 +25,8 @@ pub struct HydroShiftLcdController {
     rotation: ScreenRotation,
     initialized: bool,
     use_c_command: bool,
+    firmware_string: Option<String>,
+    firmware_version: Option<(u32, u32)>,
 }
 
 impl HydroShiftLcdController {
@@ -40,6 +42,8 @@ impl HydroShiftLcdController {
             rotation: ScreenRotation::Rotate0,
             initialized: false,
             use_c_command: false,
+            firmware_string: None,
+            firmware_version: None,
         };
 
         ctrl.init()?;
@@ -54,16 +58,9 @@ impl HydroShiftLcdController {
 
         match self.read_firmware_internal(INIT_READ_TIMEOUT_MS) {
             Ok(fw) => {
-                if let Some(ver) = parse_firmware_version(&fw) {
-                    if ver > (1, 3) {
-                        info!("  Firmware: {fw} (using 512-byte frame mode)");
-                        self.use_c_command = true;
-                    } else {
-                        info!("  Firmware: {fw}");
-                    }
-                } else {
-                    info!("  Firmware: {fw}");
-                }
+                self.firmware_version = parse_firmware_version(&fw);
+                self.firmware_string = Some(fw.clone());
+                info!("  Firmware: {fw}");
             }
             Err(e) => warn!("  Failed to read firmware: {e:#}"),
         }
@@ -80,8 +77,31 @@ impl HydroShiftLcdController {
 
         std::thread::sleep(std::time::Duration::from_secs(2));
 
+        if let Err(e) = self.apply_lcd_settings() {
+            warn!("  apply_lcd_settings failed: {e:#}");
+        }
+
         self.initialized = true;
         Ok(())
+    }
+
+    pub fn supports_c_command(&self) -> bool {
+        self.firmware_version
+            .map(|v| v >= self.variant.c_command_min_firmware())
+            .unwrap_or(false)
+    }
+
+    pub fn set_use_c_command(&mut self, enable: bool) {
+        self.use_c_command = enable && self.supports_c_command();
+        debug!(
+            "AIO LCD: use_c_command set to {} (request={enable}, supported={})",
+            self.use_c_command,
+            self.supports_c_command()
+        );
+    }
+
+    pub fn firmware_version_str(&self) -> Option<&str> {
+        self.firmware_string.as_deref()
     }
 
     pub fn handshake(&mut self) -> Result<AioHandshake> {
@@ -322,7 +342,40 @@ impl HydroShiftLcdController {
     }
 
     fn send_b_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
-        self.send_chunked(cmd, data)
+        let total_size = data.len();
+        let mut offset = 0;
+        let mut packet_num: u32 = 0;
+        let mut dev = self.device.lock();
+
+        loop {
+            let remaining = total_size.saturating_sub(offset);
+            let chunk_len = remaining.min(B_MAX_PAYLOAD);
+
+            let pkt = build_lcd_packet(
+                REPORT_ID_B,
+                B_PACKET_SIZE,
+                cmd,
+                total_size as u32,
+                packet_num,
+                if chunk_len > 0 {
+                    &data[offset..offset + chunk_len]
+                } else {
+                    &[]
+                },
+            );
+
+            dev.write(&pkt).context("AIO LCD: write B command")?;
+
+            offset += chunk_len;
+            packet_num += 1;
+
+            if offset >= total_size {
+                break;
+            }
+        }
+
+        self.read_ack(&mut dev, "send_b_command", READ_TIMEOUT_MS);
+        Ok(())
     }
 
     fn send_chunked(&self, cmd: u8, data: &[u8]) -> Result<()> {
@@ -364,7 +417,15 @@ impl HydroShiftLcdController {
             }
         }
 
+        self.read_ack(&mut dev, "send_chunked", ACK_TIMEOUT_MS);
         Ok(())
+    }
+
+    fn read_ack(&self, dev: &mut HidBackend, label: &str, timeout_ms: i32) {
+        let mut buf = [0u8; 512];
+        if let Err(e) = dev.read_timeout(&mut buf, timeout_ms) {
+            debug!("AIO LCD: {label} ack: {e:#}");
+        }
     }
 }
 
@@ -486,5 +547,17 @@ impl LcdDevice for HydroShiftLcdController {
 
     fn check_and_recover_lcd(&mut self) -> Result<()> {
         HydroShiftLcdController::check_and_recover_lcd(self)
+    }
+
+    fn supports_c_command(&self) -> bool {
+        HydroShiftLcdController::supports_c_command(self)
+    }
+
+    fn firmware_version_str(&self) -> Option<&str> {
+        HydroShiftLcdController::firmware_version_str(self)
+    }
+
+    fn set_use_c_command(&mut self, enable: bool) {
+        HydroShiftLcdController::set_use_c_command(self, enable);
     }
 }

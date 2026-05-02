@@ -75,6 +75,13 @@ pub trait LcdDevice: Send + Sync {
     fn check_and_recover_lcd(&mut self) -> Result<()> {
         Ok(())
     }
+    fn supports_c_command(&self) -> bool {
+        false
+    }
+    fn firmware_version_str(&self) -> Option<&str> {
+        None
+    }
+    fn set_use_c_command(&mut self, _enable: bool) {}
 }
 
 /// An AIO device with pump, fans, and optionally LCD.

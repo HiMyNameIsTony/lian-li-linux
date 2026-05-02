@@ -61,6 +61,13 @@ impl AioLcdVariant {
     pub fn has_pump_rgb(&self) -> bool {
         matches!(self, Self::Galahad2Lcd | Self::Galahad2Vision)
     }
+
+    pub fn c_command_min_firmware(&self) -> (u32, u32) {
+        match self {
+            Self::HydroShiftLcd | Self::HydroShiftLcdRgb | Self::HydroShiftLcdTl => (1, 2),
+            Self::Galahad2Lcd | Self::Galahad2Vision => (1, 5),
+        }
+    }
 }
 
 #[repr(u8)]

@@ -308,6 +308,8 @@ impl ServiceManager {
                             pump_rpm_range: None,
                             fan_quantity: supports_quantity.then_some(fan_count),
                             max_fan_quantity: max_quantity,
+                            firmware_version: None,
+                            supports_c_command: false,
                         });
                     }
                     fan_devices.insert(base_id.to_string(), fan_ctrl);

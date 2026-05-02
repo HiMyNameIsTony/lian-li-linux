@@ -85,6 +85,9 @@ pub struct ServiceManager {
     hid_backends: HashMap<String, Arc<Mutex<HidBackend>>>,
     /// Cached USB device list from enumerate_devices() — refreshed every USB_ENUM_INTERVAL.
     cached_usb_devices: Vec<DeviceInfo>,
+    /// Firmware string + C-command capability per AIO LCD device_id, populated
+    /// when the controller attaches and surfaced through DeviceInfo.
+    aio_lcd_info: HashMap<String, (Option<String>, bool)>,
     last_wireless_count: usize,
     poll_tick: u32,
     restart_requested: bool,
@@ -119,6 +122,7 @@ impl ServiceManager {
             wired_fan_devices: Arc::new(HashMap::new()),
             hid_backends: HashMap::new(),
             cached_usb_devices: Vec::new(),
+            aio_lcd_info: HashMap::new(),
             last_wireless_count: 0,
             poll_tick: 0,
             restart_requested: false,

@@ -41,11 +41,17 @@ pub struct LcdConfig {
     pub smooth_edges: Option<bool>,
     #[serde(default)]
     pub custom_h264: Option<bool>,
+    #[serde(default)]
+    pub aio_512_frame: Option<bool>,
 }
 
 impl LcdConfig {
     pub fn smooth_edges(&self) -> bool {
         self.smooth_edges.unwrap_or(false)
+    }
+
+    pub fn aio_512_frame(&self) -> bool {
+        self.aio_512_frame.unwrap_or(true)
     }
 
     pub fn custom_h264(&self) -> bool {

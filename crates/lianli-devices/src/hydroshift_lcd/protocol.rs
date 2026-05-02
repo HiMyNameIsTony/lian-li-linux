@@ -14,6 +14,7 @@ pub(super) const C_MAX_PAYLOAD: usize = C_PACKET_SIZE - 11; // 501
 
 pub(super) const READ_TIMEOUT_MS: i32 = 1000;
 pub(super) const INIT_READ_TIMEOUT_MS: i32 = 3000;
+pub(super) const ACK_TIMEOUT_MS: i32 = 20;
 
 // A-Commands. Currently-unused commands prefixed with `_`.
 pub(super) const CMD_HANDSHAKE: u8 = 0x81;

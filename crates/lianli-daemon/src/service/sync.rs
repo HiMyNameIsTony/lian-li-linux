@@ -39,6 +39,11 @@ impl ServiceManager {
                             | lianli_shared::device_id::DeviceFamily::HydroShift2Lcd
                     );
 
+                    let (firmware_version, supports_c_command) = self
+                        .aio_lcd_info
+                        .get(&device_id)
+                        .cloned()
+                        .unwrap_or((None, false));
                     cached.push(DeviceInfo {
                         device_id: device_id.clone(),
                         family: det.family,
@@ -61,6 +66,8 @@ impl ServiceManager {
                         pump_rpm_range: None,
                         fan_quantity: None,
                         max_fan_quantity: None,
+                        firmware_version,
+                        supports_c_command,
                     });
                 }
 
@@ -159,6 +166,8 @@ impl ServiceManager {
                 pump_rpm_range: dev.fan_type.pump_rpm_range(),
                 fan_quantity: None,
                 max_fan_quantity: None,
+                firmware_version: None,
+                supports_c_command: false,
             });
 
             // Update RPM telemetry keyed by device_id
@@ -222,6 +231,8 @@ impl ServiceManager {
                 pump_rpm_range: dev.fan_type.pump_rpm_range(),
                 fan_quantity: None,
                 max_fan_quantity: None,
+                firmware_version: None,
+                supports_c_command: false,
             });
         }
 

@@ -283,13 +283,23 @@ impl ServiceManager {
                 };
 
                 match backend_result {
-                    Ok(lcd) => {
+                    Ok(mut lcd) => {
                         info!(
                             "[devices] LCD[{}] attached (serial: {}, orientation: {:.0}°)",
                             device_cfg.device_id(),
                             candidate.device_id,
                             device_cfg.orientation
                         );
+                        if let LcdBackend::HidLcd(ref mut hid) = lcd {
+                            hid.set_use_c_command(device_cfg.aio_512_frame());
+                            self.aio_lcd_info.insert(
+                                candidate.device_id.clone(),
+                                (
+                                    hid.firmware_version_str().map(|s| s.to_string()),
+                                    hid.supports_c_command(),
+                                ),
+                            );
+                        }
                         let screen =
                             screen_info_for(candidate.family).unwrap_or(ScreenInfo::WIRELESS_LCD);
                         let target = ActiveTarget::new(

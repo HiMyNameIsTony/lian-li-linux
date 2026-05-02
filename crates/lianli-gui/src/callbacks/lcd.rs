@@ -35,6 +35,7 @@ pub(crate) fn wire_lcd_callbacks(
                         template_id: None,
                         smooth_edges: None,
                         custom_h264: None,
+                        aio_512_frame: None,
                     });
                 }
             }
@@ -244,6 +245,7 @@ pub(crate) fn wire_lcd_callbacks(
                             "fps" => lcd.fps = Some(val.parse::<f32>().unwrap_or(30.0)),
                             "smooth_edges" => lcd.smooth_edges = Some(val == "true"),
                             "custom_h264" => lcd.custom_h264 = Some(val == "true"),
+                            "aio_512_frame" => lcd.aio_512_frame = Some(val == "true"),
                             "rgb_r" => {
                                 lcd.rgb.get_or_insert([0, 0, 0])[0] = val.parse().unwrap_or(0)
                             }

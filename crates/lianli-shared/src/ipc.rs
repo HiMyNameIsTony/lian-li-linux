@@ -200,6 +200,10 @@ pub struct DeviceInfo {
     pub fan_quantity: Option<u8>,
     #[serde(default)]
     pub max_fan_quantity: Option<u8>,
+    #[serde(default)]
+    pub firmware_version: Option<String>,
+    #[serde(default)]
+    pub supports_c_command: bool,
 }
 
 /// Status of the OpenRGB SDK server.
