@@ -426,7 +426,10 @@ fn handle_request(
             }))
         }
 
-        IpcRequest::SetEne6k77FanQuantity { device_id, quantity } => {
+        IpcRequest::SetEne6k77FanQuantity {
+            device_id,
+            quantity,
+        } => {
             tx.send(DaemonEvent::SetEne6k77FanQuantity {
                 device_id,
                 quantity,

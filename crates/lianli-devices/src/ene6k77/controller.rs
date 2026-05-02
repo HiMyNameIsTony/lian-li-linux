@@ -102,10 +102,24 @@ impl Ene6k77Controller {
                 vec![REPORT_ID, 0x10, 0x60, group + 1, qty, 0x00]
             }
             Ene6k77Model::SlV2Fan | Ene6k77Model::SlV2aFan => {
-                vec![REPORT_ID, 0x10, 0x60, (group << 4) | (qty & 0x0F), 0x00, 0x00]
+                vec![
+                    REPORT_ID,
+                    0x10,
+                    0x60,
+                    (group << 4) | (qty & 0x0F),
+                    0x00,
+                    0x00,
+                ]
             }
             _ => {
-                vec![REPORT_ID, 0x10, 0x32, (group << 4) | (qty & 0x0F), 0x00, 0x00]
+                vec![
+                    REPORT_ID,
+                    0x10,
+                    0x32,
+                    (group << 4) | (qty & 0x0F),
+                    0x00,
+                    0x00,
+                ]
             }
         };
 

@@ -254,7 +254,8 @@ impl ServiceManager {
                 if let Some(fan_ctrl) = set.fan {
                     info!("Opened {name} as fan device: {base_id}");
                     let supports_quantity = fan_ctrl.supports_fan_quantity();
-                    let max_quantity = supports_quantity.then(|| fan_ctrl.max_fan_quantity_per_port());
+                    let max_quantity =
+                        supports_quantity.then(|| fan_ctrl.max_fan_quantity_per_port());
 
                     if supports_quantity {
                         if let (Some(serial_str), Some(cfg)) = (serial, self.config.as_ref()) {
