@@ -14,7 +14,27 @@ use parking_lot::Mutex;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
+
+/// Used by `stream_h264_reader` to split the pipe byte stream into complete frames.
+fn find_au_split(data: &[u8]) -> Option<usize> {
+    let mut found_first = false;
+    let mut i = 0;
+    while i + 4 < data.len() {
+        if data[i..i + 4] == [0, 0, 0, 1] {
+            let nal_type = data[i + 4] & 0x1F;
+            if matches!(nal_type, 1 | 5 | 9) {
+                if found_first {
+                    return Some(i);
+                }
+                found_first = true;
+            }
+        }
+        i += 1;
+    }
+    None
+}
 
 /// HydroShift LCD / Galahad2 LCD AIO controller.
 ///
@@ -29,6 +49,7 @@ pub struct HydroShiftLcdController {
     use_c_command: bool,
     firmware_string: Option<String>,
     firmware_version: Option<(u32, u32)>,
+    last_recovery_attempt: Option<Instant>,
 }
 
 impl HydroShiftLcdController {
@@ -46,6 +67,7 @@ impl HydroShiftLcdController {
             use_c_command: false,
             firmware_string: None,
             firmware_version: None,
+            last_recovery_attempt: None,
         };
 
         ctrl.init()?;
@@ -84,6 +106,7 @@ impl HydroShiftLcdController {
         }
 
         self.initialized = true;
+        self.last_recovery_attempt = Some(Instant::now());
         Ok(())
     }
 
@@ -168,16 +191,28 @@ impl HydroShiftLcdController {
     }
 
     pub fn stream_h264_reader(&self, reader: &mut dyn Read, stop: &AtomicBool) -> Result<()> {
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut read_buf = vec![0u8; 64 * 1024];
+        let mut accum: Vec<u8> = Vec::with_capacity(256 * 1024);
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let n = reader.read(&mut buf).context("AIO LCD: read h264 stream")?;
+            let n = reader
+                .read(&mut read_buf)
+                .context("AIO LCD: read h264 stream")?;
             if n == 0 {
                 break;
             }
-            self.send_h264_frame(&buf[..n])?;
+            accum.extend_from_slice(&read_buf[..n]);
+            while let Some(split) = find_au_split(&accum) {
+                let au: Vec<u8> = accum.drain(..split).collect();
+                if !au.is_empty() {
+                    self.send_h264_frame(&au)?;
+                }
+            }
+        }
+        if !accum.is_empty() {
+            self.send_h264_frame(&accum)?;
         }
         Ok(())
     }
@@ -196,16 +231,23 @@ impl HydroShiftLcdController {
             .context("AIO LCD: write LCD available check")?;
 
         let mut buf = vec![0u8; B_PACKET_SIZE];
-        let n = dev
-            .read_timeout(&mut buf, READ_TIMEOUT_MS)
-            .context("AIO LCD: read LCD available response")?;
+        loop {
+            let n = dev
+                .read_timeout(&mut buf, READ_TIMEOUT_MS)
+                .context("AIO LCD: read LCD available response")?;
 
-        if n == 0 || buf[1] != CMD_LCD_AVAILABLE {
-            return Ok(false);
+            if n == 0 {
+                return Ok(false);
+            }
+            if buf[1] == CMD_LCD_AVAILABLE {
+                let data_len = (buf[9] as usize) << 8 | buf[10] as usize;
+                return Ok(data_len == 1 && buf[B_HEADER_LEN] == 0);
+            }
+            debug!(
+                "AIO LCD: is_lcd_available: skipping stale response cmd={:#04x}",
+                buf[1]
+            );
         }
-
-        let data_len = (buf[9] as usize) << 8 | buf[10] as usize;
-        Ok(data_len == 1 && buf[B_HEADER_LEN] == 0)
     }
 
     /// Reset device (A-command 0x8E). Device may emit a transient status byte `2`
@@ -248,10 +290,19 @@ impl HydroShiftLcdController {
         if !self.use_c_command {
             return Ok(());
         }
+        const RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
+        if self
+            .last_recovery_attempt
+            .map(|t| t.elapsed() < RECOVERY_COOLDOWN)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
         match self.is_lcd_available() {
             Ok(true) => Ok(()),
             Ok(false) => {
                 warn!("LCD not available, attempting reset");
+                self.last_recovery_attempt = Some(Instant::now());
                 if self.reset_device() {
                     info!("Device reset successful, reinitializing LCD");
                     std::thread::sleep(std::time::Duration::from_millis(500));
