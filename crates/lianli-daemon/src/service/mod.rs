@@ -194,6 +194,7 @@ impl ServiceManager {
                     "Wireless device count changed ({} -> {}), rebuilding RGB controller",
                     self.last_wireless_count, current_wireless
                 );
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 self.rebuild_rgb_controller();
                 self.ensure_aio_defaults();
                 self.restart_fan_control();
@@ -267,6 +268,9 @@ impl ServiceManager {
         ));
         self.try_wireless();
         self.last_wireless_count = self.wireless.devices().len();
+        if self.wireless.has_discovered_devices() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
         if !self.use_rusb() {
             ensure_hid_devices_bound();
         }
