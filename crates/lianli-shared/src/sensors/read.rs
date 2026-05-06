@@ -1,9 +1,41 @@
 use super::{DiskDirection, NetDirection, NvidiaMetric, RateState, ResolvedSensor, SensorSource};
 use crate::systeminfo::SysSensor;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Locate the `nvidia-smi` binary, falling back to common absolute paths when
+/// the daemon's `$PATH` doesn't include the directory it lives in (e.g. NixOS
+/// systemd user services start with a minimal PATH).
+pub fn nvidia_smi_path() -> Option<&'static Path> {
+    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if let Ok(path_var) = std::env::var("PATH") {
+                for dir in path_var.split(':').filter(|s| !s.is_empty()) {
+                    let candidate = Path::new(dir).join("nvidia-smi");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            for p in [
+                "/run/current-system/sw/bin/nvidia-smi",
+                "/run/wrappers/bin/nvidia-smi",
+                "/usr/bin/nvidia-smi",
+                "/usr/local/bin/nvidia-smi",
+            ] {
+                let path = Path::new(p);
+                if path.is_file() {
+                    return Some(path.to_path_buf());
+                }
+            }
+            None
+        })
+        .as_deref()
+}
 
 pub fn read_sensor_value(resolved: &ResolvedSensor) -> anyhow::Result<f32> {
     match resolved {
@@ -116,7 +148,8 @@ fn nvidia_cache_get(index: u32, metric: NvidiaMetric) -> f32 {
 }
 
 fn query_nvidia_smi_all() -> anyhow::Result<HashMap<(u32, NvidiaMetric), f32>> {
-    let output = Command::new("nvidia-smi")
+    let path = nvidia_smi_path().ok_or_else(|| anyhow::anyhow!("nvidia-smi not found"))?;
+    let output = Command::new(path)
         .args([
             "--query-gpu=index,temperature.gpu,utilization.gpu",
             "--format=csv,noheader,nounits",

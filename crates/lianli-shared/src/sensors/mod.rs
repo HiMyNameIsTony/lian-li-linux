@@ -22,7 +22,7 @@ pub use enumerate::{
 pub use picker::{
     find_default_cpu_temp, find_default_gpu_temp, infer_sensor_category, pick_source_for_category,
 };
-pub use read::{get_mem_usage, read_sensor_value};
+pub use read::{get_mem_usage, nvidia_smi_path, read_sensor_value};
 pub use resolve::{coolant_runtime_path, resolve_sensor, write_coolant_temp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize, Serialize)]

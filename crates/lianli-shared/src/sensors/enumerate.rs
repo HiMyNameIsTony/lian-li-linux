@@ -1,3 +1,4 @@
+use super::read::nvidia_smi_path;
 use super::{
     DiskDirection, NetDirection, NvidiaMetric, PwmHeader, SensorInfo, SensorName, SensorSource,
     Unit,
@@ -127,46 +128,48 @@ pub fn enumerate_sensors() -> Vec<SensorInfo> {
         }
     }
 
-    if let Ok(output) = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=index,name,temperature.gpu,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(", ").collect();
-                if parts.len() >= 4 {
-                    let gpu_index: u32 = parts[0].trim().parse().unwrap_or(0);
-                    let gpu_name = parts[1].trim();
-                    let temp: Option<f32> = parts[2].trim().parse().ok();
-                    let usage: Option<f32> = parts[3].trim().parse().ok();
+    if let Some(nvidia_smi) = nvidia_smi_path() {
+        if let Ok(output) = Command::new(nvidia_smi)
+            .args([
+                "--query-gpu=index,name,temperature.gpu,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(", ").collect();
+                    if parts.len() >= 4 {
+                        let gpu_index: u32 = parts[0].trim().parse().unwrap_or(0);
+                        let gpu_name = parts[1].trim();
+                        let temp: Option<f32> = parts[2].trim().parse().ok();
+                        let usage: Option<f32> = parts[3].trim().parse().ok();
 
-                    sensors.push(SensorInfo {
-                        source: SensorSource::NvidiaGpu {
-                            gpu_index,
-                            metric: NvidiaMetric::Temp,
-                        },
-                        sensor_name: None,
-                        display_name: Some(format!("{gpu_name}: Temp")),
-                        current_value: temp,
-                        unit: Unit::C,
-                        divider: 1,
-                    });
+                        sensors.push(SensorInfo {
+                            source: SensorSource::NvidiaGpu {
+                                gpu_index,
+                                metric: NvidiaMetric::Temp,
+                            },
+                            sensor_name: None,
+                            display_name: Some(format!("{gpu_name}: Temp")),
+                            current_value: temp,
+                            unit: Unit::C,
+                            divider: 1,
+                        });
 
-                    sensors.push(SensorInfo {
-                        source: SensorSource::NvidiaGpu {
-                            gpu_index,
-                            metric: NvidiaMetric::Usage,
-                        },
-                        sensor_name: None,
-                        display_name: Some(format!("{gpu_name}: Usage")),
-                        current_value: usage,
-                        unit: Unit::PERCENT,
-                        divider: 1,
-                    });
+                        sensors.push(SensorInfo {
+                            source: SensorSource::NvidiaGpu {
+                                gpu_index,
+                                metric: NvidiaMetric::Usage,
+                            },
+                            sensor_name: None,
+                            display_name: Some(format!("{gpu_name}: Usage")),
+                            current_value: usage,
+                            unit: Unit::PERCENT,
+                            divider: 1,
+                        });
+                    }
                 }
             }
         }
