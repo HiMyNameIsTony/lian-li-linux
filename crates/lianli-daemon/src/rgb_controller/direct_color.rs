@@ -83,10 +83,9 @@ pub fn start_direct_color_writer(
                 if !wireless.is_empty() {
                     let mut rgb = rgb.lock();
                     for (device_id, zones) in wireless {
-                        for (zone, colors) in zones {
-                            if let Err(e) = rgb.set_direct_colors(&device_id, zone, &colors) {
-                                debug!("Wireless flush error for {device_id} zone {zone}: {e}");
-                            }
+                        let zones_vec: Vec<(u8, Vec<[u8; 3]>)> = zones.into_iter().collect();
+                        if let Err(e) = rgb.apply_direct_zones(&device_id, &zones_vec) {
+                            debug!("Wireless flush error for {device_id}: {e}");
                         }
                     }
                 }

@@ -251,6 +251,78 @@ impl RgbController {
         anyhow::bail!("RGB device not found: {device_id}");
     }
 
+    /// Apply direct-color updates for multiple zones of a single device, then
+    /// send the resulting full LED state in ONE RF transmission.
+    ///
+    /// `set_direct_colors` always sends the full bank state (because the RF
+    /// protocol is per-bank, not per-zone), so calling it once per zone for an
+    /// SL-Infinity bank with 3 fans triples the RF traffic for the same
+    /// visual result. Batching here cuts that overhead.
+    ///
+    /// For wired devices and rejected zones, falls back to per-zone calls.
+    /// Returns the first error encountered, but attempts every zone.
+    pub fn apply_direct_zones(
+        &mut self,
+        device_id: &str,
+        zones: &[(u8, Vec<[u8; 3]>)],
+    ) -> anyhow::Result<()> {
+        if self.wired.contains_key(device_id) {
+            // Wired path has no shared bank state — just delegate per-zone.
+            let mut first_err = None;
+            for (zone, colors) in zones {
+                if let Err(e) = self.set_direct_colors(device_id, *zone, colors) {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            return first_err.map(Err).unwrap_or(Ok(()));
+        }
+
+        if let (Some(ref wireless), Some(state)) =
+            (&self.wireless, self.wireless_state.get_mut(device_id))
+        {
+            let total_zones = if state.fan_type.is_aio() {
+                state.fan_count as usize + 1
+            } else if state.fan_type.is_rgb_only() {
+                1
+            } else {
+                state.fan_count as usize
+            };
+
+            let leds_in_zone = if state.fan_type.is_rgb_only() {
+                state.led_state.len()
+            } else {
+                state.leds_per_fan as usize
+            };
+
+            let mut applied_any = false;
+            for (zone, colors) in zones {
+                let zone_idx = *zone as usize;
+                if zone_idx >= total_zones {
+                    debug!(
+                        "Skipping zone {zone} for {device_id}: out of range (total={total_zones}, fan_count={})",
+                        state.fan_count
+                    );
+                    continue;
+                }
+                let start = zone_idx * leds_in_zone;
+                let copy_len = colors.len().min(leds_in_zone);
+                state.led_state[start..start + copy_len].copy_from_slice(&colors[..copy_len]);
+                applied_any = true;
+            }
+
+            if applied_any {
+                state.effect_counter = state.effect_counter.wrapping_add(1);
+                let idx = state.effect_counter.to_be_bytes();
+                wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
+            }
+            return Ok(());
+        }
+
+        anyhow::bail!("RGB device not found: {device_id}");
+    }
+
     pub fn capabilities(&self) -> Vec<RgbDeviceCapabilities> {
         let mut caps = Vec::new();
 
