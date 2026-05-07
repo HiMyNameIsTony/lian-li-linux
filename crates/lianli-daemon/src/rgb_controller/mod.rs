@@ -172,12 +172,29 @@ impl RgbController {
                 ),
             };
 
-            // Update led_state for this sub-zone with the effect's base
-            // color (so any other zones currently in Static remain visible
-            // in the composite, and so set_direct_colors / mode changes see
-            // a sensible "settled" baseline).
-            let zone_color = render_zone_color(effect, slice_len);
-            state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
+            // For non-animated modes (Static, Off): always overwrite the
+            // slice with the rendered uniform color — that's the whole
+            // point of Static.
+            //
+            // For animated modes (Breathing, …): preserve any existing
+            // per-LED colors so the "set per-LED via Direct, then switch
+            // to Breathing" workflow works (each LED breathes its own
+            // color, matching how RAM controllers behave). But if the
+            // slice is currently all-black (no Direct setup yet), seed
+            // it with the effect's base color so the user sees SOMETHING
+            // when they pick Breathing on a fresh device.
+            if pattern_is_animated(effect.mode) {
+                let slice = &state.led_state[slice_start..slice_start + slice_len];
+                let slice_is_blank = slice.iter().all(|c| *c == [0, 0, 0]);
+                if slice_is_blank {
+                    let zone_color = render_zone_color(effect, slice_len);
+                    state.led_state[slice_start..slice_start + slice_len]
+                        .copy_from_slice(&zone_color);
+                }
+            } else {
+                let zone_color = render_zone_color(effect, slice_len);
+                state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
+            }
 
             // Track this effect for composition, OR remove it (Static / Off
             // are baked into led_state and don't need per-frame animation).
@@ -580,34 +597,45 @@ fn paint_breathing(
     slice_start: usize,
     slice_len: usize,
 ) {
-    let base = effect.colors.first().copied().unwrap_or([255, 255, 255]);
     let scale = (effect.brightness as f32 / 4.0).clamp(0.0, 1.0);
-    // Speed → cycles-per-window. Default speed=2 ≈ 2 cycles in 60 frames
-    // (~1 Hz pulse at 33 ms/frame). Faster speeds pack more cycles in.
-    let cycles = breathing_cycles_per_window(effect.speed);
+    // Speed → integer cycles-per-window. Must be integer so the animation
+    // wraps cleanly at frame N (otherwise the loop restarts mid-pulse and
+    // looks broken). Window is COMPOSITE_FRAMES × COMPOSITE_INTERVAL_MS
+    // ≈ 2 s, so cycles == frequency in Hz × 2.
+    let cycles = breathing_cycles_per_window(effect.speed) as f32;
     let n = frames.len() as f32;
+    // Capture the slice's per-LED base colors from frame 0 (which still
+    // reflects the device's state.led_state at composition time). This lets
+    // each LED breathe its own color — set per-LED via Direct first, then
+    // pick Breathing, and the colors persist while only brightness pulses.
+    let base_colors: Vec<[u8; 3]> = frames[0][slice_start..slice_start + slice_len].to_vec();
     for (i, frame) in frames.iter_mut().enumerate() {
         let t = (i as f32 * cycles) / n; // 0..cycles
         let phase = t.fract(); // 0..1 within current cycle
         let factor = (std::f32::consts::PI * phase).sin() * scale;
-        let color = [
-            (base[0] as f32 * factor) as u8,
-            (base[1] as f32 * factor) as u8,
-            (base[2] as f32 * factor) as u8,
-        ];
-        for slot in &mut frame[slice_start..slice_start + slice_len] {
-            *slot = color;
+        for (j, slot) in frame[slice_start..slice_start + slice_len]
+            .iter_mut()
+            .enumerate()
+        {
+            let base = base_colors[j];
+            *slot = [
+                (base[0] as f32 * factor) as u8,
+                (base[1] as f32 * factor) as u8,
+                (base[2] as f32 * factor) as u8,
+            ];
         }
     }
 }
 
-fn breathing_cycles_per_window(speed: u8) -> f32 {
+/// Speed → integer breathing cycles per ~2-second composite window.
+/// Must be integer so the animation wraps cleanly at the frame boundary.
+fn breathing_cycles_per_window(speed: u8) -> u32 {
     match speed.min(4) {
-        0 => 1.0,
-        1 => 1.5,
-        2 => 2.0,
-        3 => 3.0,
-        _ => 4.0,
+        0 => 1, // ~0.5 Hz
+        1 => 2, // ~1   Hz
+        2 => 3, // ~1.5 Hz (default)
+        3 => 4, // ~2   Hz
+        _ => 6, // ~3   Hz
     }
 }
 
