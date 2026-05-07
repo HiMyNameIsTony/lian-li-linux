@@ -557,10 +557,14 @@ fn pattern_is_animated(mode: RgbMode) -> bool {
     matches!(mode, RgbMode::Breathing)
 }
 
-/// Global frame budget for composite uploads. 60 frames × 33 ms ≈ 2 s loop.
-/// Each animated sub-zone fits its pattern into this window (period-extended
-/// or repeated as needed).
-const COMPOSITE_FRAMES: usize = 60;
+/// Global frame budget for composite uploads. 150 frames × 33 ms ≈ 5 s loop.
+/// Wide enough that slow patterns like Breathing can give a natural-feeling
+/// pulse cadence (e.g. 1 cycle/5s ≈ 12 BPM, like a relaxed exhale) at the
+/// slowest speed. Each animated sub-zone fits its pattern into this window
+/// (period-extended or repeated as needed). LZO compresses the highly
+/// repetitive breathing/static frames very efficiently so the upload size
+/// stays small.
+const COMPOSITE_FRAMES: usize = 150;
 const COMPOSITE_INTERVAL_MS: u16 = 33;
 
 /// Render a composite animation covering every animated sub-zone of a
@@ -631,15 +635,22 @@ fn paint_breathing(
     }
 }
 
-/// Speed → integer breathing cycles per ~2-second composite window.
+/// Speed → integer breathing cycles per ~5-second composite window.
 /// Must be integer so the animation wraps cleanly at the frame boundary.
+/// Mapped onto natural breathing/pulse cadences:
+///
+///   speed 0 → 1 cycle / 5s ≈ 0.2 Hz  ≈ 12 BPM (slow, relaxed)
+///   speed 1 → 2 cycles    ≈ 0.4 Hz  ≈ 24 BPM
+///   speed 2 → 3 cycles    ≈ 0.6 Hz  ≈ 36 BPM (default — brisk)
+///   speed 3 → 5 cycles    ≈ 1.0 Hz  ≈ 60 BPM (rapid)
+///   speed 4 → 10 cycles   ≈ 2.0 Hz  ≈ 120 BPM (pulse-like)
 fn breathing_cycles_per_window(speed: u8) -> u32 {
     match speed.min(4) {
-        0 => 1, // ~0.5 Hz
-        1 => 2, // ~1   Hz
-        2 => 3, // ~1.5 Hz (default)
-        3 => 4, // ~2   Hz
-        _ => 6, // ~3   Hz
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 5,
+        _ => 10,
     }
 }
 
