@@ -449,12 +449,13 @@ impl WirelessController {
             handle
                 .write(&packet, USB_TIMEOUT)
                 .context("sending RGB RF packet")?;
-            // 200µs (was 1ms) — empirical pacing to avoid the dongle's USB
-            // endpoint buffer overflowing on back-to-back chunks. Reducing
-            // gives ~5x headroom on RF send rate, which matters for keeping
-            // master-clock heartbeats and PWM updates from being starved when
-            // OpenRGB clients flood UPDATE_LEDS at 60+ fps per device.
-            thread::sleep(Duration::from_micros(200));
+            // 100µs — empirical pacing to avoid the dongle's USB endpoint
+            // buffer overflowing on back-to-back chunks. Reducing from the
+            // historical 1ms gives ~10x headroom on RF send rate, which
+            // matters for keeping master-clock heartbeats, PWM updates, and
+            // device-state polling from being starved when OpenRGB clients
+            // flood UPDATE_LEDS at 60+ fps per device.
+            thread::sleep(Duration::from_micros(100));
         }
         Ok(())
     }
