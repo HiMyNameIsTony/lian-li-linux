@@ -557,15 +557,21 @@ fn pattern_is_animated(mode: RgbMode) -> bool {
     matches!(mode, RgbMode::Breathing)
 }
 
-/// Global frame budget for composite uploads. 360 frames × 33 ms ≈ 12 s loop.
-/// Wide enough that slow patterns like Breathing can give properly relaxed
-/// pulse cadences (1 cycle / 12s ≈ 5 BPM, like a meditative exhale) at the
-/// slowest speed. Each animated sub-zone fits its pattern into this window
-/// (period-extended or repeated as needed). LZO compresses the highly
-/// repetitive breathing/static frames very efficiently so even hundreds of
-/// frames stay within a few KB compressed.
-const COMPOSITE_FRAMES: usize = 360;
-const COMPOSITE_INTERVAL_MS: u16 = 33;
+/// Global frame budget for composite uploads. 120 frames × 100 ms = 12 s loop.
+///
+/// Why 100 ms per frame and not something faster: the SL-Infinity firmware
+/// appears to enforce a minimum playback interval (~21 ms observed) and
+/// silently clamps anything below it, which made small interval_ms values
+/// play much faster than the daemon intended. Staying well above that
+/// floor keeps the math honest. 10 fps is plenty for breathing/pulsing.
+///
+/// 12 s is wide enough that slow patterns like Breathing can give
+/// properly relaxed cadences (1 cycle / 12s ≈ 5 BPM, like a meditative
+/// exhale) at the slowest speed. LZO compresses the highly repetitive
+/// breathing/static frames very efficiently so even hundreds of frames
+/// stay within a few KB compressed.
+const COMPOSITE_FRAMES: usize = 120;
+const COMPOSITE_INTERVAL_MS: u16 = 100;
 
 /// Render a composite animation covering every animated sub-zone of a
 /// wireless device. Non-animated zones contribute their current `led_state`
@@ -636,7 +642,9 @@ fn paint_breathing(
 }
 
 /// Speed → integer breathing cycles per ~12-second composite window.
-/// Must be integer so the animation wraps cleanly at the frame boundary.
+/// Must be integer (and ideally evenly divide COMPOSITE_FRAMES = 120) so
+/// the animation wraps cleanly at the frame boundary.
+///
 /// Mapped onto natural breathing/pulse cadences:
 ///
 ///   speed 0 → 1 cycle / 12s   ≈ 5 BPM  (meditative)

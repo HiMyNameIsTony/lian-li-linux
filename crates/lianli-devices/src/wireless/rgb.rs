@@ -119,19 +119,13 @@ impl WirelessController {
                     rf_data[25] = (total_frames >> 8) as u8;
                     rf_data[26] = (total_frames & 0xFF) as u8;
                     rf_data[27] = led_num;
-                    // L-Connect 3 encodes `interval` as seconds with
-                    // centisecond precision (NOT milliseconds):
-                    //   bytes 32-33: integer seconds (BE u16)
-                    //   byte 34:    centisecond remainder (0..99)
-                    // Sending interval_ms raw into bytes 32-33 means the
-                    // firmware reads "33 seconds per frame", which it
-                    // clamps down to its internal minimum (~20-21ms).
-                    let total_centisecs = (interval_ms as u32 + 5) / 10; // round
-                    let int_secs: u16 = (total_centisecs / 100) as u16;
-                    let frac_centisecs: u8 = (total_centisecs % 100) as u8;
-                    rf_data[32] = (int_secs >> 8) as u8;
-                    rf_data[33] = (int_secs & 0xFF) as u8;
-                    rf_data[34] = frac_centisecs;
+                    // interval encoding (matches L-Connect 3):
+                    //   bytes 32-33: integer milliseconds (BE u16)
+                    //   byte 34:    sub-millisecond fraction × 100 (0..99)
+                    // We work in whole-ms units, so byte 34 stays 0.
+                    rf_data[32] = (interval_ms >> 8) as u8;
+                    rf_data[33] = (interval_ms & 0xFF) as u8;
+                    rf_data[34] = 0;
 
                     let repeats = header_repeats.max(1);
                     let gap_ms = if repeats <= 2 { 2 } else { 20 };
