@@ -172,39 +172,46 @@ impl RgbController {
                 ),
             };
 
-            // Animated modes render a multi-frame loop and upload via
-            // send_rgb_frames; firmware plays autonomously with zero RF
-            // traffic until the next mode change. Non-animated modes
-            // (Static, Off, etc.) fall through to single-frame send_rgb_direct.
-            if let Some((frames, interval_ms)) =
-                render_pattern_frames(effect, &state.led_state, slice_start, slice_len)
-            {
-                state.effect_counter = state.effect_counter.wrapping_add(1);
-                let idx = state.effect_counter.to_be_bytes();
+            // Update led_state for this sub-zone with the effect's base
+            // color (so any other zones currently in Static remain visible
+            // in the composite, and so set_direct_colors / mode changes see
+            // a sensible "settled" baseline).
+            let zone_color = render_zone_color(effect, slice_len);
+            state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
+
+            // Track this effect for composition, OR remove it (Static / Off
+            // are baked into led_state and don't need per-frame animation).
+            if pattern_is_animated(effect.mode) {
+                state.sub_zone_effects.insert(zone, effect.clone());
+            } else {
+                state.sub_zone_effects.remove(&zone);
+            }
+
+            // If any sub-zone wants animation, upload a composite frame
+            // sequence covering all of them. Otherwise upload a single frame
+            // (cheaper) and let the firmware hold it.
+            state.effect_counter = state.effect_counter.wrapping_add(1);
+            let idx = state.effect_counter.to_be_bytes();
+
+            if state.sub_zone_effects.is_empty() {
+                wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
+                debug!(
+                    "Set wireless RGB on {device_id} zone {zone}: {:?}, {} LEDs (no animation)",
+                    effect.mode, slice_len
+                );
+            } else {
+                let (frames, interval_ms) = render_composite_frames(state);
                 wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
                 if let Some(mid) = frames.get(frames.len() / 2) {
                     state.led_state.copy_from_slice(mid);
                 }
                 info!(
-                    "Uploaded {:?} animation to {device_id} zone {zone}: {} frames @ {}ms",
-                    effect.mode,
+                    "Uploaded composite ({} animated zone(s)) to {device_id}: {} frames @ {}ms",
+                    state.sub_zone_effects.len(),
                     frames.len(),
                     interval_ms
                 );
-                return Ok(());
             }
-
-            let zone_color = render_zone_color(effect, slice_len);
-            state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
-
-            state.effect_counter = state.effect_counter.wrapping_add(1);
-            let idx = state.effect_counter.to_be_bytes();
-
-            wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
-            debug!(
-                "Set wireless RGB on {device_id} zone {zone}: {:?}, {} LEDs",
-                effect.mode, slice_len
-            );
             return Ok(());
         }
 
@@ -237,6 +244,8 @@ impl RgbController {
             let copy_len = colors.len().min(slice_len);
             state.led_state[slice_start..slice_start + copy_len]
                 .copy_from_slice(&colors[..copy_len]);
+            // Direct mode supersedes any composite animation on this zone.
+            state.sub_zone_effects.remove(&zone);
 
             state.effect_counter = state.effect_counter.wrapping_add(1);
             let idx = state.effect_counter.to_be_bytes();
@@ -295,6 +304,8 @@ impl RgbController {
                 let copy_len = colors.len().min(slice_len);
                 state.led_state[slice_start..slice_start + copy_len]
                     .copy_from_slice(&colors[..copy_len]);
+                // Direct overrides any composite animation on this zone.
+                state.sub_zone_effects.remove(zone);
                 applied_any = true;
             }
 
@@ -519,62 +530,85 @@ impl RgbController {
 }
 
 /// Render a solid color array for a single zone from an RgbEffect.
-/// Dispatch a `RgbEffect` to the per-mode renderer. Returns
-/// `Some((frames, interval_ms))` for animated modes that should be uploaded
-/// via `send_rgb_frames`, or `None` for modes that should fall through to a
-/// single-frame send (Static, Off, etc.) or per-LED control (Direct).
-fn render_pattern_frames(
-    effect: &RgbEffect,
-    base_state: &[[u8; 3]],
-    slice_start: usize,
-    slice_len: usize,
-) -> Option<(Vec<Vec<[u8; 3]>>, u16)> {
-    match effect.mode {
-        RgbMode::Breathing => Some(render_breathing(effect, base_state, slice_start, slice_len)),
-        _ => None,
-    }
+/// Whether a mode produces a multi-frame animation (and so should
+/// participate in composition). Static, Off, and Direct don't.
+fn pattern_is_animated(mode: RgbMode) -> bool {
+    matches!(mode, RgbMode::Breathing)
 }
 
-/// Speed (0..=4) → interval_ms for breathing. Default speed=2 → 33ms × 30
-/// frames ≈ 1 Hz pulse.
-fn breathing_interval_ms(speed: u8) -> u16 {
-    match speed.min(4) {
-        0 => 67,
-        1 => 50,
-        2 => 33,
-        3 => 22,
-        _ => 17,
+/// Global frame budget for composite uploads. 60 frames × 33 ms ≈ 2 s loop.
+/// Each animated sub-zone fits its pattern into this window (period-extended
+/// or repeated as needed).
+const COMPOSITE_FRAMES: usize = 60;
+const COMPOSITE_INTERVAL_MS: u16 = 33;
+
+/// Render a composite animation covering every animated sub-zone of a
+/// wireless device. Non-animated zones contribute their current `led_state`
+/// values as a static layer.
+///
+/// The frame budget is fixed (`COMPOSITE_FRAMES` × `COMPOSITE_INTERVAL_MS`).
+/// Each animated sub-zone's natural cycle is fitted into this window — at
+/// the cost of slightly off-period playback for patterns whose natural
+/// cycles don't divide the window evenly. Worth it: one upload covers
+/// every zone simultaneously, regardless of how many or what mix of
+/// patterns are active.
+fn render_composite_frames(state: &WirelessRgbState) -> (Vec<Vec<[u8; 3]>>, u16) {
+    let mut frames: Vec<Vec<[u8; 3]>> = (0..COMPOSITE_FRAMES)
+        .map(|_| state.led_state.clone())
+        .collect();
+
+    for (zone_idx, effect) in &state.sub_zone_effects {
+        let Some((slice_start, slice_len)) = wireless_zone_slice(state, *zone_idx as usize) else {
+            continue;
+        };
+        match effect.mode {
+            RgbMode::Breathing => paint_breathing(&mut frames, effect, slice_start, slice_len),
+            _ => {}
+        }
     }
+
+    (frames, COMPOSITE_INTERVAL_MS)
 }
 
-/// Render a Breathing animation for a slice of LEDs. Other LEDs in each
-/// frame are copied from `base_state` so multi-zone composition works.
-fn render_breathing(
+/// Paint a breathing pattern over `[slice_start..slice_start+slice_len)` in
+/// each frame, scaled by `effect.brightness` and modulated by a sine wave
+/// whose period is determined by `effect.speed` relative to the composite
+/// window length.
+fn paint_breathing(
+    frames: &mut [Vec<[u8; 3]>],
     effect: &RgbEffect,
-    base_state: &[[u8; 3]],
     slice_start: usize,
     slice_len: usize,
-) -> (Vec<Vec<[u8; 3]>>, u16) {
-    const FRAMES: usize = 30;
+) {
     let base = effect.colors.first().copied().unwrap_or([255, 255, 255]);
     let scale = (effect.brightness as f32 / 4.0).clamp(0.0, 1.0);
-    let slice_end = slice_start + slice_len;
-    let mut frames = Vec::with_capacity(FRAMES);
-    for i in 0..FRAMES {
-        let t = (i as f32) / (FRAMES as f32);
-        let factor = (std::f32::consts::PI * t).sin() * scale;
+    // Speed → cycles-per-window. Default speed=2 ≈ 2 cycles in 60 frames
+    // (~1 Hz pulse at 33 ms/frame). Faster speeds pack more cycles in.
+    let cycles = breathing_cycles_per_window(effect.speed);
+    let n = frames.len() as f32;
+    for (i, frame) in frames.iter_mut().enumerate() {
+        let t = (i as f32 * cycles) / n; // 0..cycles
+        let phase = t.fract(); // 0..1 within current cycle
+        let factor = (std::f32::consts::PI * phase).sin() * scale;
         let color = [
             (base[0] as f32 * factor) as u8,
             (base[1] as f32 * factor) as u8,
             (base[2] as f32 * factor) as u8,
         ];
-        let mut frame = base_state.to_vec();
-        for slot in &mut frame[slice_start..slice_end] {
+        for slot in &mut frame[slice_start..slice_start + slice_len] {
             *slot = color;
         }
-        frames.push(frame);
     }
-    (frames, breathing_interval_ms(effect.speed))
+}
+
+fn breathing_cycles_per_window(speed: u8) -> f32 {
+    match speed.min(4) {
+        0 => 1.0,
+        1 => 1.5,
+        2 => 2.0,
+        3 => 3.0,
+        _ => 4.0,
+    }
 }
 
 /// Resolve an OpenRGB zone index into a (start, length) slice within the
