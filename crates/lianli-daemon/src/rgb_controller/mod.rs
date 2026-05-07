@@ -172,21 +172,24 @@ impl RgbController {
                 ),
             };
 
-            // EXPERIMENTAL: for Breathing, render the whole animation cycle
-            // and upload it. Fans should then play it autonomously with zero
-            // further RF traffic until the next mode change.
-            if effect.mode == RgbMode::Breathing {
-                let frames = render_breathing_frames(effect, &state.led_state, slice_start, slice_len, 30);
+            // Animated modes render a multi-frame loop and upload via
+            // send_rgb_frames; firmware plays autonomously with zero RF
+            // traffic until the next mode change. Non-animated modes
+            // (Static, Off, etc.) fall through to single-frame send_rgb_direct.
+            if let Some((frames, interval_ms)) =
+                render_pattern_frames(effect, &state.led_state, slice_start, slice_len)
+            {
                 state.effect_counter = state.effect_counter.wrapping_add(1);
                 let idx = state.effect_counter.to_be_bytes();
-                // 33ms interval × 30 frames = ~1Hz pulse cycle
-                wireless.send_rgb_frames(&state.mac, &frames, 33, &idx, 4)?;
+                wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
                 if let Some(mid) = frames.get(frames.len() / 2) {
                     state.led_state.copy_from_slice(mid);
                 }
                 info!(
-                    "Uploaded Breathing animation to {device_id} zone {zone}: {} frames @ 33ms",
-                    frames.len()
+                    "Uploaded {:?} animation to {device_id} zone {zone}: {} frames @ {}ms",
+                    effect.mode,
+                    frames.len(),
+                    interval_ms
                 );
                 return Ok(());
             }
@@ -516,23 +519,49 @@ impl RgbController {
 }
 
 /// Render a solid color array for a single zone from an RgbEffect.
-/// Render a sequence of full-bank LED state frames for a "breathing" effect
-/// applied to a slice of LEDs. Other LEDs in the bank keep their last state.
-/// Produces `frame_count` frames where the target slice fades brightness in
-/// a sine curve (0 → max → 0).
-fn render_breathing_frames(
+/// Dispatch a `RgbEffect` to the per-mode renderer. Returns
+/// `Some((frames, interval_ms))` for animated modes that should be uploaded
+/// via `send_rgb_frames`, or `None` for modes that should fall through to a
+/// single-frame send (Static, Off, etc.) or per-LED control (Direct).
+fn render_pattern_frames(
     effect: &RgbEffect,
     base_state: &[[u8; 3]],
     slice_start: usize,
     slice_len: usize,
-    frame_count: usize,
-) -> Vec<Vec<[u8; 3]>> {
+) -> Option<(Vec<Vec<[u8; 3]>>, u16)> {
+    match effect.mode {
+        RgbMode::Breathing => Some(render_breathing(effect, base_state, slice_start, slice_len)),
+        _ => None,
+    }
+}
+
+/// Speed (0..=4) → interval_ms for breathing. Default speed=2 → 33ms × 30
+/// frames ≈ 1 Hz pulse.
+fn breathing_interval_ms(speed: u8) -> u16 {
+    match speed.min(4) {
+        0 => 67,
+        1 => 50,
+        2 => 33,
+        3 => 22,
+        _ => 17,
+    }
+}
+
+/// Render a Breathing animation for a slice of LEDs. Other LEDs in each
+/// frame are copied from `base_state` so multi-zone composition works.
+fn render_breathing(
+    effect: &RgbEffect,
+    base_state: &[[u8; 3]],
+    slice_start: usize,
+    slice_len: usize,
+) -> (Vec<Vec<[u8; 3]>>, u16) {
+    const FRAMES: usize = 30;
     let base = effect.colors.first().copied().unwrap_or([255, 255, 255]);
     let scale = (effect.brightness as f32 / 4.0).clamp(0.0, 1.0);
     let slice_end = slice_start + slice_len;
-    let mut frames = Vec::with_capacity(frame_count);
-    for i in 0..frame_count {
-        let t = (i as f32) / (frame_count as f32);
+    let mut frames = Vec::with_capacity(FRAMES);
+    for i in 0..FRAMES {
+        let t = (i as f32) / (FRAMES as f32);
         let factor = (std::f32::consts::PI * t).sin() * scale;
         let color = [
             (base[0] as f32 * factor) as u8,
@@ -545,7 +574,7 @@ fn render_breathing_frames(
         }
         frames.push(frame);
     }
-    frames
+    (frames, breathing_interval_ms(effect.speed))
 }
 
 /// Resolve an OpenRGB zone index into a (start, length) slice within the
