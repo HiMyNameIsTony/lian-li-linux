@@ -714,8 +714,15 @@ impl ClientHandler {
         buf.extend_from_slice(&(DIR_RIGHT).to_le_bytes()); // direction
         buf.extend_from_slice(&color_mode.to_le_bytes());
 
-        // colors: empty by default for new modes
-        buf.extend_from_slice(&0u16.to_le_bytes()); // 0 colors
+        // colors: must satisfy colors_min. OpenRGB GUI crashes if the mode
+        // declares colors_min=1 but has num_colors=0. Provide one default
+        // color (white) when at least one is required.
+        if colors_min > 0 {
+            buf.extend_from_slice(&1u16.to_le_bytes()); // 1 color
+            buf.extend_from_slice(&0x00FFFFFFu32.to_le_bytes()); // BBGGRR = white
+        } else {
+            buf.extend_from_slice(&0u16.to_le_bytes()); // 0 colors
+        }
 
         buf
     }

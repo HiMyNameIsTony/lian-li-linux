@@ -183,6 +183,27 @@ impl RgbController {
                 state.leds_per_fan as usize
             };
 
+            // EXPERIMENTAL: for Breathing, render the whole animation cycle
+            // and upload it. Fans should then play it autonomously with zero
+            // further RF traffic until the next mode change.
+            if effect.mode == RgbMode::Breathing {
+                let frames = render_breathing_frames(effect, &state.led_state, zone_idx, leds_in_zone, 30);
+                state.effect_counter = state.effect_counter.wrapping_add(1);
+                let idx = state.effect_counter.to_be_bytes();
+                // 33ms interval × 30 frames = ~1Hz pulse cycle
+                wireless.send_rgb_frames(&state.mac, &frames, 33, &idx, 4)?;
+                // Update local state to reflect the "settled" middle frame so
+                // subsequent reads see something reasonable.
+                if let Some(mid) = frames.get(frames.len() / 2) {
+                    state.led_state.copy_from_slice(mid);
+                }
+                info!(
+                    "Uploaded Breathing animation to {device_id} zone {zone}: {} frames @ 33ms",
+                    frames.len()
+                );
+                return Ok(());
+            }
+
             let zone_color = render_zone_color(effect, leds_in_zone);
 
             let start = zone_idx * leds_in_zone;
@@ -371,7 +392,7 @@ impl RgbController {
             caps.push(RgbDeviceCapabilities {
                 device_id: device_id.clone(),
                 device_name: state.fan_type.display_name().to_string(),
-                supported_modes: vec![RgbMode::Static, RgbMode::Direct],
+                supported_modes: vec![RgbMode::Static, RgbMode::Direct, RgbMode::Breathing],
                 zones,
                 supports_direct: true,
                 supports_mb_rgb_sync: false,
@@ -524,6 +545,39 @@ impl RgbController {
 }
 
 /// Render a solid color array for a single zone from an RgbEffect.
+/// Render a sequence of full-bank LED state frames for a "breathing" effect
+/// applied to a single zone. Other zones in the bank keep their last state.
+/// Produces `frame_count` frames where the target zone fades brightness in a
+/// sine curve (0 → max → 0).
+fn render_breathing_frames(
+    effect: &RgbEffect,
+    base_state: &[[u8; 3]],
+    zone_idx: usize,
+    leds_in_zone: usize,
+    frame_count: usize,
+) -> Vec<Vec<[u8; 3]>> {
+    let base = effect.colors.first().copied().unwrap_or([255, 255, 255]);
+    let scale = (effect.brightness as f32 / 4.0).clamp(0.0, 1.0);
+    let zone_start = zone_idx * leds_in_zone;
+    let zone_end = zone_start + leds_in_zone;
+    let mut frames = Vec::with_capacity(frame_count);
+    for i in 0..frame_count {
+        let t = (i as f32) / (frame_count as f32);
+        let factor = (std::f32::consts::PI * t).sin() * scale;
+        let color = [
+            (base[0] as f32 * factor) as u8,
+            (base[1] as f32 * factor) as u8,
+            (base[2] as f32 * factor) as u8,
+        ];
+        let mut frame = base_state.to_vec();
+        for slot in &mut frame[zone_start..zone_end] {
+            *slot = color;
+        }
+        frames.push(frame);
+    }
+    frames
+}
+
 fn render_zone_color(effect: &RgbEffect, led_count: usize) -> Vec<[u8; 3]> {
     let color = match effect.mode {
         RgbMode::Off => [0, 0, 0],
