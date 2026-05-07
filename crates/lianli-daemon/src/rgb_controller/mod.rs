@@ -219,9 +219,13 @@ impl RgbController {
             } else {
                 let (frames, interval_ms) = render_composite_frames(state);
                 wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
-                if let Some(mid) = frames.get(frames.len() / 2) {
-                    state.led_state.copy_from_slice(mid);
-                }
+                // Don't poison led_state with rendered frame contents — it
+                // would cascade-corrupt subsequent set_effect calls (the
+                // animation's "middle" frame can be all-black depending on
+                // cycle parity, then the next zone sees a blank slice and
+                // re-seeds it with the mode's default color, looking like
+                // colors mysteriously reset). led_state stays as the
+                // unmodulated base colors that the composite paints from.
                 info!(
                     "Uploaded composite ({} animated zone(s)) to {device_id}: {} frames @ {}ms",
                     state.sub_zone_effects.len(),
