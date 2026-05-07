@@ -557,14 +557,14 @@ fn pattern_is_animated(mode: RgbMode) -> bool {
     matches!(mode, RgbMode::Breathing)
 }
 
-/// Global frame budget for composite uploads. 150 frames × 33 ms ≈ 5 s loop.
-/// Wide enough that slow patterns like Breathing can give a natural-feeling
-/// pulse cadence (e.g. 1 cycle/5s ≈ 12 BPM, like a relaxed exhale) at the
+/// Global frame budget for composite uploads. 360 frames × 33 ms ≈ 12 s loop.
+/// Wide enough that slow patterns like Breathing can give properly relaxed
+/// pulse cadences (1 cycle / 12s ≈ 5 BPM, like a meditative exhale) at the
 /// slowest speed. Each animated sub-zone fits its pattern into this window
 /// (period-extended or repeated as needed). LZO compresses the highly
-/// repetitive breathing/static frames very efficiently so the upload size
-/// stays small.
-const COMPOSITE_FRAMES: usize = 150;
+/// repetitive breathing/static frames very efficiently so even hundreds of
+/// frames stay within a few KB compressed.
+const COMPOSITE_FRAMES: usize = 360;
 const COMPOSITE_INTERVAL_MS: u16 = 33;
 
 /// Render a composite animation covering every animated sub-zone of a
@@ -635,22 +635,22 @@ fn paint_breathing(
     }
 }
 
-/// Speed → integer breathing cycles per ~5-second composite window.
+/// Speed → integer breathing cycles per ~12-second composite window.
 /// Must be integer so the animation wraps cleanly at the frame boundary.
 /// Mapped onto natural breathing/pulse cadences:
 ///
-///   speed 0 → 1 cycle / 5s ≈ 0.2 Hz  ≈ 12 BPM (slow, relaxed)
-///   speed 1 → 2 cycles    ≈ 0.4 Hz  ≈ 24 BPM
-///   speed 2 → 3 cycles    ≈ 0.6 Hz  ≈ 36 BPM (default — brisk)
-///   speed 3 → 5 cycles    ≈ 1.0 Hz  ≈ 60 BPM (rapid)
-///   speed 4 → 10 cycles   ≈ 2.0 Hz  ≈ 120 BPM (pulse-like)
+///   speed 0 → 1 cycle / 12s   ≈ 5 BPM  (meditative)
+///   speed 1 → 2 cycles        ≈ 10 BPM (slow, relaxed)
+///   speed 2 → 4 cycles        ≈ 20 BPM (default — brisk)
+///   speed 3 → 6 cycles        ≈ 30 BPM (rapid)
+///   speed 4 → 12 cycles       ≈ 60 BPM (pulse-like)
 fn breathing_cycles_per_window(speed: u8) -> u32 {
     match speed.min(4) {
         0 => 1,
         1 => 2,
-        2 => 3,
-        3 => 5,
-        _ => 10,
+        2 => 4,
+        3 => 6,
+        _ => 12,
     }
 }
 
