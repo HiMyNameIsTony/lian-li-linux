@@ -41,6 +41,7 @@ const DEVICE_TYPE_COOLER: u32 = 3;
 // ModeFlags
 const MODE_FLAG_HAS_SPEED: u32 = 1 << 0;
 const MODE_FLAG_HAS_DIRECTION_LR: u32 = 1 << 1;
+#[allow(dead_code)] // kept for protocol completeness; we don't expose UD direction
 const MODE_FLAG_HAS_DIRECTION_UD: u32 = 1 << 2;
 const MODE_FLAG_HAS_BRIGHTNESS: u32 = 1 << 4;
 const MODE_FLAG_HAS_PER_LED_COLOR: u32 = 1 << 5;
@@ -643,30 +644,24 @@ impl ClientHandler {
 
         // Add each supported mode from the device
         for rgb_mode in &cap.supported_modes {
-            if matches!(rgb_mode, RgbMode::Off | RgbMode::Direct | RgbMode::Static) {
-                continue; // Skip Off (brightness=0), Direct (already added), Static (same as Direct)
+            // Off and Direct never need a separate mode entry: Off is just
+            // brightness=0 and Direct was added above.
+            if matches!(rgb_mode, RgbMode::Off | RgbMode::Direct) {
+                continue;
             }
 
             let name = rgb_mode.display_name();
             let value = rgb_mode.to_tl_mode_byte().unwrap_or(0) as u32;
-
-            let mut flags = MODE_FLAG_HAS_SPEED
-                | MODE_FLAG_HAS_BRIGHTNESS
-                | MODE_FLAG_HAS_DIRECTION_LR
-                | MODE_FLAG_HAS_DIRECTION_UD;
-
-            let (color_mode, colors_min, colors_max) = match rgb_mode {
-                RgbMode::Rainbow | RgbMode::RainbowMorph | RgbMode::ColorCycle => {
-                    (COLOR_MODE_NONE, 0, 0)
-                }
-                _ => {
-                    flags |= MODE_FLAG_HAS_MODE_SPECIFIC_COLOR;
-                    (COLOR_MODE_MODE_SPECIFIC, 1, 4)
-                }
-            };
+            let descriptor = mode_descriptor(*rgb_mode);
 
             modes.push(self.build_mode_entry(
-                name, value, flags, color_mode, colors_min, colors_max, 0, // speed_min
+                name,
+                value,
+                descriptor.flags,
+                descriptor.color_mode,
+                descriptor.colors_min,
+                descriptor.colors_max,
+                0, // speed_min
                 4, // speed_max
                 2, // default speed
                 4, // default brightness
@@ -743,6 +738,67 @@ impl ClientHandler {
 }
 
 /// Write an OpenRGB-format string: u16 length (includes null) + bytes + null.
+/// Per-mode metadata advertised to OpenRGB clients. Tracks which sliders /
+/// color pickers / direction toggles the GUI should show for each mode.
+struct ModeDescriptor {
+    flags: u32,
+    color_mode: u32,
+    colors_min: u32,
+    colors_max: u32,
+}
+
+fn mode_descriptor(mode: RgbMode) -> ModeDescriptor {
+    use RgbMode::*;
+    let (flags, color_mode, colors_min, colors_max) = match mode {
+        // Single fixed color, no animation. brightness scales the chosen color.
+        Static => (
+            MODE_FLAG_HAS_BRIGHTNESS | MODE_FLAG_HAS_MODE_SPECIFIC_COLOR,
+            COLOR_MODE_MODE_SPECIFIC,
+            1,
+            1,
+        ),
+        // Sine pulse of one color.
+        Breathing => (
+            MODE_FLAG_HAS_SPEED
+                | MODE_FLAG_HAS_BRIGHTNESS
+                | MODE_FLAG_HAS_MODE_SPECIFIC_COLOR,
+            COLOR_MODE_MODE_SPECIFIC,
+            1,
+            1,
+        ),
+        // Hue rotates as a wave across the slice — direction reverses scroll.
+        Rainbow => (
+            MODE_FLAG_HAS_SPEED | MODE_FLAG_HAS_BRIGHTNESS | MODE_FLAG_HAS_DIRECTION_LR,
+            COLOR_MODE_NONE,
+            0,
+            0,
+        ),
+        // Uniform hue across the slice, hue cycles through 360°.
+        RainbowMorph | ColorCycle => (
+            MODE_FLAG_HAS_SPEED | MODE_FLAG_HAS_BRIGHTNESS,
+            COLOR_MODE_NONE,
+            0,
+            0,
+        ),
+        // Default for any mode we haven't explicitly described yet — give it
+        // the full set of sliders so the GUI doesn't crash on missing fields.
+        _ => (
+            MODE_FLAG_HAS_SPEED
+                | MODE_FLAG_HAS_BRIGHTNESS
+                | MODE_FLAG_HAS_MODE_SPECIFIC_COLOR,
+            COLOR_MODE_MODE_SPECIFIC,
+            1,
+            1,
+        ),
+    };
+    ModeDescriptor {
+        flags,
+        color_mode,
+        colors_min,
+        colors_max,
+    }
+}
+
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let len = s.len() as u16 + 1; // +1 for null terminator
     buf.extend_from_slice(&len.to_le_bytes());
