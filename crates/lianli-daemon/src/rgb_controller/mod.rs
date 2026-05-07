@@ -163,37 +163,24 @@ impl RgbController {
             (&self.wireless, self.wireless_state.get_mut(device_id))
         {
             let zone_idx = zone as usize;
-            let total_zones = if state.fan_type.is_aio() {
-                state.fan_count as usize + 1
-            } else if state.fan_type.is_rgb_only() {
-                1
-            } else {
-                state.fan_count as usize
-            };
-
-            if zone_idx >= total_zones {
-                anyhow::bail!(
-                    "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})", state.fan_type, state.fan_count
-                );
-            }
-
-            let leds_in_zone = if state.fan_type.is_rgb_only() {
-                state.led_state.len()
-            } else {
-                state.leds_per_fan as usize
+            let total_zones = wireless_total_zones(state);
+            let (slice_start, slice_len) = match wireless_zone_slice(state, zone_idx) {
+                Some(s) => s,
+                None => anyhow::bail!(
+                    "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})",
+                    state.fan_type, state.fan_count
+                ),
             };
 
             // EXPERIMENTAL: for Breathing, render the whole animation cycle
             // and upload it. Fans should then play it autonomously with zero
             // further RF traffic until the next mode change.
             if effect.mode == RgbMode::Breathing {
-                let frames = render_breathing_frames(effect, &state.led_state, zone_idx, leds_in_zone, 30);
+                let frames = render_breathing_frames(effect, &state.led_state, slice_start, slice_len, 30);
                 state.effect_counter = state.effect_counter.wrapping_add(1);
                 let idx = state.effect_counter.to_be_bytes();
                 // 33ms interval × 30 frames = ~1Hz pulse cycle
                 wireless.send_rgb_frames(&state.mac, &frames, 33, &idx, 4)?;
-                // Update local state to reflect the "settled" middle frame so
-                // subsequent reads see something reasonable.
                 if let Some(mid) = frames.get(frames.len() / 2) {
                     state.led_state.copy_from_slice(mid);
                 }
@@ -204,19 +191,16 @@ impl RgbController {
                 return Ok(());
             }
 
-            let zone_color = render_zone_color(effect, leds_in_zone);
-
-            let start = zone_idx * leds_in_zone;
-            let end = start + leds_in_zone;
-            state.led_state[start..end].copy_from_slice(&zone_color);
+            let zone_color = render_zone_color(effect, slice_len);
+            state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
 
             state.effect_counter = state.effect_counter.wrapping_add(1);
             let idx = state.effect_counter.to_be_bytes();
 
             wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
             debug!(
-                "Set wireless RGB on {device_id} zone {zone}: {:?}, {} LEDs/zone",
-                effect.mode, leds_in_zone
+                "Set wireless RGB on {device_id} zone {zone}: {:?}, {} LEDs",
+                effect.mode, slice_len
             );
             return Ok(());
         }
@@ -239,29 +223,17 @@ impl RgbController {
             (&self.wireless, self.wireless_state.get_mut(device_id))
         {
             let zone_idx = zone as usize;
-            let total_zones = if state.fan_type.is_aio() {
-                state.fan_count as usize + 1
-            } else if state.fan_type.is_rgb_only() {
-                1
-            } else {
-                state.fan_count as usize
+            let total_zones = wireless_total_zones(state);
+            let (slice_start, slice_len) = match wireless_zone_slice(state, zone_idx) {
+                Some(s) => s,
+                None => anyhow::bail!(
+                    "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})",
+                    state.fan_type, state.fan_count
+                ),
             };
-
-            if zone_idx >= total_zones {
-                anyhow::bail!(
-                    "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})", state.fan_type, state.fan_count
-                );
-            }
-
-            let leds_in_zone = if state.fan_type.is_rgb_only() {
-                state.led_state.len()
-            } else {
-                state.leds_per_fan as usize
-            };
-
-            let start = zone_idx * leds_in_zone;
-            let copy_len = colors.len().min(leds_in_zone);
-            state.led_state[start..start + copy_len].copy_from_slice(&colors[..copy_len]);
+            let copy_len = colors.len().min(slice_len);
+            state.led_state[slice_start..slice_start + copy_len]
+                .copy_from_slice(&colors[..copy_len]);
 
             state.effect_counter = state.effect_counter.wrapping_add(1);
             let idx = state.effect_counter.to_be_bytes();
@@ -303,33 +275,23 @@ impl RgbController {
         if let (Some(ref wireless), Some(state)) =
             (&self.wireless, self.wireless_state.get_mut(device_id))
         {
-            let total_zones = if state.fan_type.is_aio() {
-                state.fan_count as usize + 1
-            } else if state.fan_type.is_rgb_only() {
-                1
-            } else {
-                state.fan_count as usize
-            };
-
-            let leds_in_zone = if state.fan_type.is_rgb_only() {
-                state.led_state.len()
-            } else {
-                state.leds_per_fan as usize
-            };
-
+            let total_zones = wireless_total_zones(state);
             let mut applied_any = false;
             for (zone, colors) in zones {
                 let zone_idx = *zone as usize;
-                if zone_idx >= total_zones {
-                    debug!(
-                        "Skipping zone {zone} for {device_id}: out of range (total={total_zones}, fan_count={})",
-                        state.fan_count
-                    );
-                    continue;
-                }
-                let start = zone_idx * leds_in_zone;
-                let copy_len = colors.len().min(leds_in_zone);
-                state.led_state[start..start + copy_len].copy_from_slice(&colors[..copy_len]);
+                let (slice_start, slice_len) = match wireless_zone_slice(state, zone_idx) {
+                    Some(s) => s,
+                    None => {
+                        debug!(
+                            "Skipping zone {zone} for {device_id}: out of range (total={total_zones}, fan_count={})",
+                            state.fan_count
+                        );
+                        continue;
+                    }
+                };
+                let copy_len = colors.len().min(slice_len);
+                state.led_state[slice_start..slice_start + copy_len]
+                    .copy_from_slice(&colors[..copy_len]);
                 applied_any = true;
             }
 
@@ -381,10 +343,19 @@ impl RgbController {
                         led_count: state.fan_type.pump_led_count() as u16,
                     });
                 }
-                zones.extend((0..state.fan_count).map(|i| RgbZoneInfo {
-                    name: format!("Fan {}", i + 1),
-                    led_count: state.leds_per_fan as u16,
-                }));
+                let sub_zones = state.fan_type.sub_zones();
+                for fan_i in 0..state.fan_count {
+                    for (sub_name, count) in &sub_zones {
+                        zones.push(RgbZoneInfo {
+                            name: if sub_zones.len() == 1 {
+                                format!("Fan {}", fan_i + 1)
+                            } else {
+                                format!("Fan {} {}", fan_i + 1, sub_name)
+                            },
+                            led_count: *count as u16,
+                        });
+                    }
+                }
             }
 
             let total_leds: u16 = zones.iter().map(|z| z.led_count).sum();
@@ -546,20 +517,19 @@ impl RgbController {
 
 /// Render a solid color array for a single zone from an RgbEffect.
 /// Render a sequence of full-bank LED state frames for a "breathing" effect
-/// applied to a single zone. Other zones in the bank keep their last state.
-/// Produces `frame_count` frames where the target zone fades brightness in a
-/// sine curve (0 → max → 0).
+/// applied to a slice of LEDs. Other LEDs in the bank keep their last state.
+/// Produces `frame_count` frames where the target slice fades brightness in
+/// a sine curve (0 → max → 0).
 fn render_breathing_frames(
     effect: &RgbEffect,
     base_state: &[[u8; 3]],
-    zone_idx: usize,
-    leds_in_zone: usize,
+    slice_start: usize,
+    slice_len: usize,
     frame_count: usize,
 ) -> Vec<Vec<[u8; 3]>> {
     let base = effect.colors.first().copied().unwrap_or([255, 255, 255]);
     let scale = (effect.brightness as f32 / 4.0).clamp(0.0, 1.0);
-    let zone_start = zone_idx * leds_in_zone;
-    let zone_end = zone_start + leds_in_zone;
+    let slice_end = slice_start + slice_len;
     let mut frames = Vec::with_capacity(frame_count);
     for i in 0..frame_count {
         let t = (i as f32) / (frame_count as f32);
@@ -570,12 +540,66 @@ fn render_breathing_frames(
             (base[2] as f32 * factor) as u8,
         ];
         let mut frame = base_state.to_vec();
-        for slot in &mut frame[zone_start..zone_end] {
+        for slot in &mut frame[slice_start..slice_end] {
             *slot = color;
         }
         frames.push(frame);
     }
     frames
+}
+
+/// Resolve an OpenRGB zone index into a (start, length) slice within the
+/// bank's full `led_state` buffer. Returns None if the zone is out of range.
+///
+/// Layout per fan type:
+/// - rgb-only: zone 0 covers all LEDs
+/// - AIO: zone 0 = Pump Head, then per-fan sub-zones
+/// - regular fan banks: per-fan sub-zones (1 zone for most, 5 zones for SL-Infinity)
+fn wireless_zone_slice(state: &WirelessRgbState, zone_idx: usize) -> Option<(usize, usize)> {
+    if state.fan_type.is_rgb_only() {
+        return if zone_idx == 0 {
+            Some((0, state.led_state.len()))
+        } else {
+            None
+        };
+    }
+    let pump_count = if state.fan_type.is_aio() {
+        state.fan_type.pump_led_count() as usize
+    } else {
+        0
+    };
+    if state.fan_type.is_aio() && zone_idx == 0 {
+        return Some((0, pump_count));
+    }
+    let fan_zone_idx = if state.fan_type.is_aio() {
+        zone_idx - 1
+    } else {
+        zone_idx
+    };
+    let sub_zones = state.fan_type.sub_zones();
+    let zones_per_fan = sub_zones.len();
+    let fan_idx = fan_zone_idx / zones_per_fan;
+    let sub_idx = fan_zone_idx % zones_per_fan;
+    if fan_idx >= state.fan_count as usize {
+        return None;
+    }
+    let leds_per_fan = state.leds_per_fan as usize;
+    let mut sub_start = 0usize;
+    for (_, count) in &sub_zones[..sub_idx] {
+        sub_start += *count as usize;
+    }
+    let len = sub_zones[sub_idx].1 as usize;
+    let start = pump_count + fan_idx * leds_per_fan + sub_start;
+    Some((start, len))
+}
+
+fn wireless_total_zones(state: &WirelessRgbState) -> usize {
+    if state.fan_type.is_rgb_only() {
+        return 1;
+    }
+    let zones_per_fan = state.fan_type.sub_zones().len();
+    let pump_zones = if state.fan_type.is_aio() { 1 } else { 0 };
+    pump_zones + state.fan_count as usize * zones_per_fan
 }
 
 fn render_zone_color(effect: &RgbEffect, led_count: usize) -> Vec<[u8; 3]> {

@@ -82,6 +82,24 @@ impl WirelessFanType {
         }
     }
 
+    /// Per-fan LED sub-zone layout, returned as (name, led_count) pairs.
+    /// Most fan types expose a single zone covering all LEDs of the fan.
+    /// SL-Infinity fans physically split into 5 regions (blades, plus left
+    /// and right side outer/inner edges) — exposing them lets OpenRGB clients
+    /// address each region independently. Sum of led_count == leds_per_fan().
+    pub fn sub_zones(self) -> Vec<(&'static str, u8)> {
+        match self {
+            Self::SlInf => vec![
+                ("Blades", 8),
+                ("Left Outer", 10),
+                ("Left Inner", 8),
+                ("Right Outer", 10),
+                ("Right Inner", 8),
+            ],
+            _ => vec![("All", self.leds_per_fan())],
+        }
+    }
+
     pub fn supports_hw_mobo_sync(self) -> bool {
         matches!(self, Self::Slv3Led | Self::Slv3Lcd)
     }
