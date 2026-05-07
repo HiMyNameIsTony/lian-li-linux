@@ -120,10 +120,17 @@ pub(super) fn parse_device_record(data: &[u8], list_index: u8) -> Option<Discove
 
     let channel = data[12];
     let rx_type = data[13];
-    let fan_count = data[19].min(4);
+    let reported_fan_count = data[19].min(4);
 
     let mut fan_types = [0u8; 4];
     fan_types.copy_from_slice(&data[24..28]);
+
+    // data[19] is unreliable on wireless banks: most banks report 4 regardless
+    // of how many fans are physically paired. fan_types[i] == 0 is a reliable
+    // "empty slot" signal, so prefer counting non-zero slots and fall back to
+    // the dongle-reported value only if fan_types is all-zero (transient probe).
+    let detected = fan_types.iter().filter(|&&b| b != 0).count() as u8;
+    let fan_count = if detected > 0 { detected } else { reported_fan_count };
 
     let fan_rpms = [
         u16::from_be_bytes([data[28], data[29]]),
