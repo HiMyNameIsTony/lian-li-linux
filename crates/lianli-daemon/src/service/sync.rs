@@ -240,9 +240,6 @@ impl ServiceManager {
         devices.extend(self.wired_fan_device_info.clone());
 
         // Read wired fan RPMs and split per port.
-        // Per-group devices (e.g. ENE 6K77) return one RPM per port regardless
-        // of fan count, so index directly by port. Per-fan devices use a flat
-        // offset that advances by fan count.
         for (base_id, dev) in self.wired_fan_devices.iter() {
             if let Ok(all_rpms) = dev.read_fan_rpm() {
                 let ports = dev.fan_port_info();
