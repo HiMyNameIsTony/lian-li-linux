@@ -231,6 +231,8 @@ pub(crate) struct ActiveTarget {
     // By using this mechanism we are able to detect whether we actually need to send the frame via USB bus to the LCD, and thus we can save quite a lot of time by not sending frames which are already displayed.
     pub(super) frame_counter: u64,
     pub(super) consecutive_errors: u32,
+    recovery_stop: Arc<AtomicBool>,
+    recovery_thread: Option<JoinHandle<()>>,
 }
 
 impl ActiveTarget {
@@ -245,6 +247,25 @@ impl ActiveTarget {
         tx: Option<Sender<DaemonEvent>>,
     ) -> Self {
         let media = MediaRuntime::from_asset(Arc::clone(&asset), tx, &lcd, &screen, custom_h264);
+        let recovery_stop = Arc::new(AtomicBool::new(false));
+        let recovery_thread = match &lcd {
+            LcdBackend::HidLcd(d) => {
+                let lcd = Arc::clone(d);
+                let stop = Arc::clone(&recovery_stop);
+                Some(thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_secs(2));
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if let Err(e) = lcd.lock().check_and_recover_lcd() {
+                            debug!("LCD[{index}] health check error: {e:#}");
+                        }
+                    }
+                }))
+            }
+            _ => None,
+        };
         Self {
             index,
             key,
@@ -256,6 +277,8 @@ impl ActiveTarget {
             custom_h264,
             frame_counter: 0,
             consecutive_errors: 0,
+            recovery_stop,
+            recovery_thread,
         }
     }
 
@@ -342,7 +365,18 @@ impl ActiveTarget {
         Ok(true)
     }
 
-    pub(super) fn stop(&mut self) {}
+    pub(super) fn stop(&mut self) {
+        self.recovery_stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.recovery_thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for ActiveTarget {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 enum MediaRuntime {

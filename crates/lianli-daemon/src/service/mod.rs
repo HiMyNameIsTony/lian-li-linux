@@ -31,7 +31,7 @@ mod shutdown;
 mod streaming;
 mod sync;
 
-use runtime::{parse_mac_str, ActiveTarget, LcdBackend};
+use runtime::{parse_mac_str, ActiveTarget};
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Full USB bus enumeration interval — only needed for hot-plug detection of
@@ -89,7 +89,6 @@ pub struct ServiceManager {
     /// when the controller attaches and surfaced through DeviceInfo.
     aio_lcd_info: HashMap<String, (Option<String>, bool)>,
     last_wireless_count: usize,
-    poll_tick: u32,
     last_poll_mono: Instant,
     last_poll_wall: std::time::SystemTime,
     restart_requested: bool,
@@ -126,7 +125,6 @@ impl ServiceManager {
             cached_usb_devices: Vec::new(),
             aio_lcd_info: HashMap::new(),
             last_wireless_count: 0,
-            poll_tick: 0,
             last_poll_mono: Instant::now(),
             last_poll_wall: std::time::SystemTime::now(),
             restart_requested: false,
@@ -226,18 +224,6 @@ impl ServiceManager {
 
         self.refresh_targets();
         self.sync_ipc_telemetry();
-
-        // Check HID LCD health every other tick (~2s)
-        self.poll_tick = self.poll_tick.wrapping_add(1);
-        if self.poll_tick % 2 == 0 {
-            for target in self.targets.values_mut() {
-                if let LcdBackend::HidLcd(d) = &target.lcd {
-                    if let Err(e) = d.lock().check_and_recover_lcd() {
-                        tracing::debug!("LCD[{}] health check error: {e:#}", target.index);
-                    }
-                }
-            }
-        }
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.

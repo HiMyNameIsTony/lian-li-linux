@@ -35,7 +35,10 @@ impl AioController {
     pub fn new(wireless: Arc<WirelessController>, config: AppConfig) -> Self {
         Self {
             wireless,
-            state: Arc::new(Mutex::new(State { config, needs_reinit: false })),
+            state: Arc::new(Mutex::new(State {
+                config,
+                needs_reinit: false,
+            })),
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread: None,
         }
