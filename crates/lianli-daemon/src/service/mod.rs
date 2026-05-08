@@ -345,6 +345,9 @@ impl ServiceManager {
                     // Refresh USB device enumeration
                     // Wireless discovery is handled by its own RX polling thread.
                     self.refresh_usb_device_cache();
+                    if !self.wireless.is_connected() {
+                        self.try_wireless();
+                    }
                 }
                 DaemonEvent::DevicePoll => {
                     self.device_poll();

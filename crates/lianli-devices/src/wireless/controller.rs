@@ -381,6 +381,10 @@ impl WirelessController {
         false
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.tx.is_some()
+    }
+
     pub fn has_discovered_devices(&self) -> bool {
         !self.discovered_devices.lock().is_empty()
     }
