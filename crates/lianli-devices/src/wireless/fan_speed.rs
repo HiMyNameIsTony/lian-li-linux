@@ -38,6 +38,29 @@ impl WirelessController {
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             ))?;
 
+        // Skip when discovery returned fan_count=0 for this bank. Under heavy
+        // RF load the dongle occasionally returns a partially-zeroed device
+        // record (validation marker present, but fan_types/data[19] both 0),
+        // which lands as fan_count=0 in `discovered_devices`. Without this
+        // guard, `apply_pwm_constraints` would zero every slot (i >= 0 holds
+        // for all i when fan_count=0) and the daemon would command the bank
+        // to PWM=[0,0,0,0] — physically stopping the fans on a real bug
+        // observed in usbmon captures, where one bank wound down to 0 RPM
+        // for ~10s before the next clean poll restored fan_count and the
+        // curve resumed driving the fans normally.
+        //
+        // Treat fan_count=0 as missing data, not a "0 fans configured"
+        // command. Skipping is safe because the dongle holds the prior PWM
+        // setting on its own; we'll send a real update on the next tick once
+        // discovery recovers.
+        if device.fan_count == 0 {
+            debug!(
+                "Skipping PWM update for {}: discovery returned fan_count=0 (transient)",
+                device.mac_str()
+            );
+            return Ok(());
+        }
+
         let seq_index = devices
             .iter()
             .filter(|d| d.master_mac == master_mac && d.device_type != 0xFF)
