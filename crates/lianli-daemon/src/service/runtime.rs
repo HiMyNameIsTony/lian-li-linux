@@ -61,10 +61,11 @@ impl LcdBackend {
         &self,
         stdout: ChildStdout,
         stop: Arc<AtomicBool>,
+        fps: f32,
     ) -> anyhow::Result<Option<JoinHandle<()>>> {
         match self {
             Self::WinUsb(sender) => {
-                sender.stream_h264_reader(stdout)?;
+                sender.stream_h264_reader(stdout, fps)?;
                 Ok(None)
             }
             Self::HidLcd(lcd) => {
@@ -72,7 +73,7 @@ impl LcdBackend {
                 let mut stdout = stdout;
                 let handle = thread::spawn(move || {
                     let mut guard = lcd.lock();
-                    if let Err(e) = guard.stream_h264_reader(&mut stdout, &stop) {
+                    if let Err(e) = guard.stream_h264_reader(&mut stdout, &stop, fps) {
                         warn!("HID h264 stream error: {e:#}");
                     }
                 });
@@ -86,8 +87,12 @@ impl LcdBackend {
 enum LcdThreadMsg {
     Frame(Vec<u8>),
     FrameVerified(Vec<u8>, std::sync::mpsc::SyncSender<anyhow::Result<()>>),
-    StreamH264 { path: PathBuf, looping: bool },
-    StreamH264Reader(ChildStdout),
+    StreamH264 {
+        path: PathBuf,
+        looping: bool,
+        fps: f32,
+    },
+    StreamH264Reader(ChildStdout, f32),
     SwitchDesktop(std::sync::mpsc::SyncSender<anyhow::Result<()>>),
     Stop,
 }
@@ -115,15 +120,15 @@ impl ThreadedWinUsbSender {
                         let result = device.send_frame_verified(&data);
                         let _ = reply.send(result);
                     }
-                    LcdThreadMsg::StreamH264 { path, looping } => {
+                    LcdThreadMsg::StreamH264 { path, looping, fps } => {
                         stop_clone.store(false, Ordering::Relaxed);
-                        if let Err(e) = device.stream_h264(&path, looping, &stop_clone) {
+                        if let Err(e) = device.stream_h264(&path, looping, &stop_clone, fps) {
                             warn!("LCD[{index}] h264 stream error: {e}");
                         }
                     }
-                    LcdThreadMsg::StreamH264Reader(mut stdout) => {
+                    LcdThreadMsg::StreamH264Reader(mut stdout, fps) => {
                         stop_clone.store(false, Ordering::Relaxed);
-                        if let Err(e) = device.stream_h264_reader(&mut stdout, &stop_clone) {
+                        if let Err(e) = device.stream_h264_reader(&mut stdout, &stop_clone, fps) {
                             warn!("LCD[{index}] live h264 stream error: {e}");
                         }
                     }
@@ -144,18 +149,18 @@ impl ThreadedWinUsbSender {
         }
     }
 
-    fn stream_h264(&self, path: PathBuf, looping: bool) -> anyhow::Result<()> {
+    fn stream_h264(&self, path: PathBuf, looping: bool, fps: f32) -> anyhow::Result<()> {
         self.h264_stop.store(true, Ordering::Relaxed);
         self.tx
-            .send(LcdThreadMsg::StreamH264 { path, looping })
+            .send(LcdThreadMsg::StreamH264 { path, looping, fps })
             .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))?;
         Ok(())
     }
 
-    fn stream_h264_reader(&self, stdout: ChildStdout) -> anyhow::Result<()> {
+    fn stream_h264_reader(&self, stdout: ChildStdout, fps: f32) -> anyhow::Result<()> {
         self.h264_stop.store(true, Ordering::Relaxed);
         self.tx
-            .send(LcdThreadMsg::StreamH264Reader(stdout))
+            .send(LcdThreadMsg::StreamH264Reader(stdout, fps))
             .map_err(|_| anyhow::anyhow!("LCD sender thread exited"))?;
         Ok(())
     }
@@ -320,6 +325,7 @@ impl ActiveTarget {
         if let MediaRuntime::H264 {
             path,
             looping,
+            fps,
             started,
             hid_thread,
             hid_stop,
@@ -329,16 +335,17 @@ impl ActiveTarget {
                 match &self.lcd {
                     LcdBackend::WinUsb(sender) => {
                         sender
-                            .stream_h264(path.clone(), *looping)
+                            .stream_h264(path.clone(), *looping, *fps)
                             .map_err(|e| SendError::Other(e))?;
                     }
                     LcdBackend::HidLcd(hid) => {
                         let lcd = Arc::clone(hid);
                         let path = path.clone();
                         let looping = *looping;
+                        let fps = *fps;
                         let stop = Arc::clone(hid_stop);
                         *hid_thread = Some(thread::spawn(move || {
-                            stream_h264_file_to_hid(lcd, path, looping, stop);
+                            stream_h264_file_to_hid(lcd, path, looping, fps, stop);
                         }));
                     }
                     _ => {}
@@ -411,6 +418,7 @@ enum MediaRuntime {
     H264 {
         path: PathBuf,
         looping: bool,
+        fps: f32,
         started: bool,
         hid_thread: Option<JoinHandle<()>>,
         hid_stop: Arc<AtomicBool>,
@@ -446,7 +454,13 @@ impl Drop for MediaRuntime {
     }
 }
 
-fn stream_h264_file_to_hid(lcd: SharedHidLcd, path: PathBuf, looping: bool, stop: Arc<AtomicBool>) {
+fn stream_h264_file_to_hid(
+    lcd: SharedHidLcd,
+    path: PathBuf,
+    looping: bool,
+    fps: f32,
+    stop: Arc<AtomicBool>,
+) {
     use std::io::{Seek, SeekFrom};
     let mut file = match std::fs::File::open(&path) {
         Ok(f) => f,
@@ -460,7 +474,7 @@ fn stream_h264_file_to_hid(lcd: SharedHidLcd, path: PathBuf, looping: bool, stop
             break;
         }
         let mut guard = lcd.lock();
-        if let Err(e) = guard.stream_h264_reader(&mut file, &stop) {
+        if let Err(e) = guard.stream_h264_reader(&mut file, &stop, fps) {
             warn!("HID h264 stream error: {e:#}");
             break;
         }
@@ -740,7 +754,7 @@ impl AsyncCustomH264Renderer {
             .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag))?;
+        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
         let stop_clone = Arc::clone(&stop_flag);
         let encoder = Arc::new(Mutex::new(encoder));
         let encoder_clone = Arc::clone(&encoder);
@@ -828,7 +842,7 @@ impl AsyncSensorH264Renderer {
             .ok_or_else(|| anyhow::anyhow!("h264 encoder stdout missing"))?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag))?;
+        let stream_thread = lcd.start_h264_stream(stdout, Arc::clone(&stop_flag), fps)?;
         let stop_clone = Arc::clone(&stop_flag);
         let encoder = Arc::new(Mutex::new(encoder));
         let encoder_clone = Arc::clone(&encoder);
@@ -939,9 +953,12 @@ impl MediaRuntime {
                     sent_frame_index: 0,
                 }
             }
-            MediaAssetKind::H264Stream { path, looping, .. } => Self::H264 {
+            MediaAssetKind::H264Stream {
+                path, looping, fps, ..
+            } => Self::H264 {
                 path: path.clone(),
                 looping: *looping,
+                fps: *fps,
                 started: false,
                 hid_thread: None,
                 hid_stop: Arc::new(AtomicBool::new(false)),

@@ -11,7 +11,7 @@ pub fn encode_h264(
     fps: f32,
     orientation: f32,
     screen: &ScreenInfo,
-) -> Result<(PathBuf, TempDir), MediaError> {
+) -> Result<(PathBuf, TempDir, f32), MediaError> {
     let temp = TempDir::new()?;
     let output = temp.path().join("stream.h264");
 
@@ -41,7 +41,7 @@ pub fn encode_h264(
                     "LCD H.264 transcode: {out_w}x{out_h}@{fps_int}fps via {}",
                     kind.name()
                 );
-                return Ok((output, temp));
+                return Ok((output, temp, fps_int as f32));
             }
             Err(stderr) => {
                 debug!("LCD H.264 encoder {} unavailable: {stderr}", kind.name());

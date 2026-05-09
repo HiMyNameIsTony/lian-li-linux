@@ -185,7 +185,7 @@ impl CustomAsset {
 
             if let WidgetKind::Video { path, .. } = &widget.kind {
                 let (ww, wh) = widget_size_px(widget, uniform_scale);
-                let decode_fps = widget.fps.unwrap_or(30.0).max(1.0);
+                let decode_fps = crate::video::cap_fps_to_source(path, widget.fps.unwrap_or(30.0));
                 match decode_frames_to_rgba(path, decode_fps, ww.max(1), wh.max(1)) {
                     Ok((frames, durations)) => {
                         let total_ms: u64 = durations
@@ -196,8 +196,9 @@ impl CustomAsset {
                         state.video_total_ms = total_ms;
                         state.video_frame_durations = Some(Arc::new(durations));
                         state.video_frames = Some(Arc::new(frames));
-                        state.video_fps_cap_ms =
-                            widget.fps.map(|fps| (1000.0 / fps.max(1.0)).round() as u64);
+                        state.video_fps_cap_ms = widget
+                            .fps
+                            .map(|_| (1000.0 / decode_fps.max(1.0)).round() as u64);
                     }
                     Err(e) => warn!(
                         "template '{}' widget '{}' video '{}' decode failed: {e}",

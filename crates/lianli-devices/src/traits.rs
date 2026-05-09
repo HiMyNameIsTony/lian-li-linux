@@ -92,6 +92,7 @@ pub trait LcdDevice: Send + Sync {
         &mut self,
         _reader: &mut dyn std::io::Read,
         _stop: &std::sync::atomic::AtomicBool,
+        _fps: f32,
     ) -> Result<()> {
         anyhow::bail!("h264 streaming not supported by this device")
     }

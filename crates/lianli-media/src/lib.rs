@@ -39,6 +39,7 @@ pub enum MediaAssetKind {
     H264Stream {
         path: PathBuf,
         looping: bool,
+        fps: f32,
         _temp: Arc<TempDir>,
     },
     Custom {
@@ -68,10 +69,12 @@ pub fn prepare_media_asset(
                 "image entry requires a 'path' field".into(),
             ))?;
             let fps = cfg.fps.unwrap_or(default_fps).max(1.0);
-            let (h264_path, temp) = video::encode_h264(path, fps, cfg.orientation, screen)?;
+            let (h264_path, temp, encoded_fps) =
+                video::encode_h264(path, fps, cfg.orientation, screen)?;
             Ok(MediaAssetKind::H264Stream {
                 path: h264_path,
                 looping: true,
+                fps: encoded_fps,
                 _temp: Arc::new(temp),
             })
         }
@@ -92,12 +95,13 @@ pub fn prepare_media_asset(
             let jpeg_path = temp.path().join("color.jpg");
             std::fs::write(&jpeg_path, image::build_color_frame(rgb, screen))?;
             let fps = cfg.fps.unwrap_or(default_fps).max(1.0);
-            let (h264_path, h264_temp) =
+            let (h264_path, h264_temp, encoded_fps) =
                 video::encode_h264(&jpeg_path, fps, cfg.orientation, screen)?;
             drop(temp);
             Ok(MediaAssetKind::H264Stream {
                 path: h264_path,
                 looping: true,
+                fps: encoded_fps,
                 _temp: Arc::new(h264_temp),
             })
         }
@@ -114,11 +118,13 @@ pub fn prepare_media_asset(
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "video/gif entry requires a 'path' field".into(),
             ))?;
-            let fps = cfg.fps.unwrap_or(default_fps).max(1.0);
-            let (h264_path, temp) = video::encode_h264(path, fps, cfg.orientation, screen)?;
+            let fps = video::cap_fps_to_source(path, cfg.fps.unwrap_or(default_fps));
+            let (h264_path, temp, encoded_fps) =
+                video::encode_h264(path, fps, cfg.orientation, screen)?;
             Ok(MediaAssetKind::H264Stream {
                 path: h264_path,
                 looping: true,
+                fps: encoded_fps,
                 _temp: Arc::new(temp),
             })
         }
@@ -130,6 +136,7 @@ pub fn prepare_media_asset(
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "video entry requires a 'path' field".into(),
             ))?;
+            let desired_fps = video::cap_fps_to_source(path, desired_fps);
             let (frames, durations) =
                 video::build_video_frames(path, desired_fps, cfg.orientation, screen)?;
             Ok(MediaAssetKind::Video {
@@ -141,8 +148,9 @@ pub fn prepare_media_asset(
             let path = cfg.path.as_ref().ok_or(MediaError::InvalidConfig(
                 "gif entry requires a 'path' field".into(),
             ))?;
+            let capped_fps = cfg.fps.map(|f| video::cap_fps_to_source(path, f));
             let (frames, durations) =
-                video::build_gif_frames(path, cfg.orientation, screen, cfg.fps)?;
+                video::build_gif_frames(path, cfg.orientation, screen, capped_fps)?;
             Ok(MediaAssetKind::Video {
                 frames: Arc::new(frames),
                 frame_durations: Arc::new(durations),
