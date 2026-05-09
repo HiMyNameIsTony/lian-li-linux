@@ -195,31 +195,35 @@ pub(super) fn encoder_codec_args_live(
         gop,
         "-c:v".into(),
         kind.name().into(),
-        "-b:v".into(),
-        bitrate_str.into(),
     ];
 
     match kind {
         EncoderKind::Nvenc => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "p1".into()]);
             args.extend(["-rc".into(), "vbr".into()]);
             args.extend(["-forced-idr".into(), "1".into()]);
         }
         EncoderKind::Amf => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-usage".into(), "lowlatency".into()]);
             args.extend(["-quality".into(), "speed".into()]);
         }
         EncoderKind::Vaapi => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-rc_mode".into(), "VBR".into()]);
             args.extend(["-bf".into(), "0".into()]);
         }
         EncoderKind::Qsv => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "veryfast".into()]);
             args.extend(["-look_ahead".into(), "0".into()]);
             args.extend(["-bf".into(), "0".into()]);
         }
         EncoderKind::Libx264 => {
             args.extend(["-preset".into(), "ultrafast".into()]);
+            args.extend(["-tune".into(), "zerolatency".into()]);
+            args.extend(["-crf".into(), "23".into()]);
             args.extend(["-x264-params".into(), "bframes=0".into()]);
         }
     }
