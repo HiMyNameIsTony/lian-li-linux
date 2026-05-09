@@ -2,6 +2,7 @@ pub mod ffmpeg;
 pub mod h264;
 pub mod h264_live;
 
+pub use ffmpeg::{cap_fps_to_source, probe_source_fps};
 pub use h264::encode_h264;
 pub use h264_live::LiveH264Encoder;
 
@@ -43,7 +44,7 @@ pub fn build_video_frames(
     let mut frames = Vec::with_capacity(entries.len());
     for frame_path in entries {
         let data = std::fs::read(&frame_path)?;
-        if orientation.abs() < f32::EPSILON && screen.device_rotation == 0 {
+        if orientation.abs() < f32::EPSILON {
             if data.len() > screen.max_payload {
                 return Err(MediaError::PayloadTooLarge { size: data.len() });
             }

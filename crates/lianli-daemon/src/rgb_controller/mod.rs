@@ -189,8 +189,7 @@ impl RgbController {
             let end = start + leds_in_zone;
             state.led_state[start..end].copy_from_slice(&zone_color);
 
-            state.effect_counter = state.effect_counter.wrapping_add(1);
-            let idx = state.effect_counter.to_be_bytes();
+            let idx = effect_index_from_state(&state.led_state);
 
             wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
             debug!(
@@ -242,8 +241,7 @@ impl RgbController {
             let copy_len = colors.len().min(leds_in_zone);
             state.led_state[start..start + copy_len].copy_from_slice(&colors[..copy_len]);
 
-            state.effect_counter = state.effect_counter.wrapping_add(1);
-            let idx = state.effect_counter.to_be_bytes();
+            let idx = effect_index_from_state(&state.led_state);
             wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
             return Ok(());
         }
@@ -521,6 +519,20 @@ impl RgbController {
             self.wireless_state = new_state;
         }
     }
+}
+
+fn effect_index_from_state(led_state: &[[u8; 3]]) -> [u8; 4] {
+    let mut h: u32 = 0x811c_9dc5;
+    for px in led_state {
+        for &b in px {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    }
+    if h == 0 {
+        h = 1;
+    }
+    h.to_be_bytes()
 }
 
 /// Render a solid color array for a single zone from an RgbEffect.

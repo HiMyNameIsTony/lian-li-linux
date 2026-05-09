@@ -1,5 +1,5 @@
 use super::h264::{
-    encoder_chain, encoder_codec_args, finalize_vf, hwaccel_input_args, EncoderKind,
+    encoder_chain, encoder_codec_args_live, finalize_vf, hwaccel_input_args, EncoderKind,
 };
 use crate::common::MediaError;
 use lianli_shared::screen::ScreenInfo;
@@ -169,7 +169,7 @@ fn try_spawn(
     if !vf.is_empty() {
         args.extend(["-vf".into(), vf]);
     }
-    args.extend(encoder_codec_args(kind, fps_str, bitrate_str));
+    args.extend(encoder_codec_args_live(kind, fps_str, bitrate_str));
     args.extend(["-color_range".into(), "pc".into()]);
     args.extend(["-an".into(), "-f".into(), "h264".into(), "pipe:1".into()]);
 

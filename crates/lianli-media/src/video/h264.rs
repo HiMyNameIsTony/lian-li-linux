@@ -11,7 +11,7 @@ pub fn encode_h264(
     fps: f32,
     orientation: f32,
     screen: &ScreenInfo,
-) -> Result<(PathBuf, TempDir), MediaError> {
+) -> Result<(PathBuf, TempDir, f32), MediaError> {
     let temp = TempDir::new()?;
     let output = temp.path().join("stream.h264");
 
@@ -41,7 +41,7 @@ pub fn encode_h264(
                     "LCD H.264 transcode: {out_w}x{out_h}@{fps_int}fps via {}",
                     kind.name()
                 );
-                return Ok((output, temp));
+                return Ok((output, temp, fps_int as f32));
             }
             Err(stderr) => {
                 debug!("LCD H.264 encoder {} unavailable: {stderr}", kind.name());
@@ -77,16 +77,14 @@ impl EncoderKind {
     }
 }
 
-pub(super) fn hw_video_disabled() -> bool {
-    std::env::var("LIANLI_DISABLE_HW_VIDEO")
+pub(super) fn hw_video_enabled() -> bool {
+    std::env::var("LIANLI_ENABLE_HW_VIDEO")
         .map(|v| v != "0" && !v.is_empty())
         .unwrap_or(false)
 }
 
 pub(super) fn encoder_chain() -> &'static [EncoderKind] {
-    if hw_video_disabled() {
-        &[EncoderKind::Libx264]
-    } else {
+    if hw_video_enabled() {
         &[
             EncoderKind::Nvenc,
             EncoderKind::Amf,
@@ -94,33 +92,21 @@ pub(super) fn encoder_chain() -> &'static [EncoderKind] {
             EncoderKind::Qsv,
             EncoderKind::Libx264,
         ]
+    } else {
+        &[EncoderKind::Libx264]
     }
 }
 
-/// Pre-input flags that select the hardware context (or `-hwaccel auto` for sw decoders).
 pub(super) fn hwaccel_input_args(kind: EncoderKind) -> Vec<String> {
     match kind {
-        EncoderKind::Vaapi => vec![
-            "-vaapi_device".into(),
-            "/dev/dri/renderD128".into(),
-            "-hwaccel".into(),
-            "vaapi".into(),
-        ],
+        EncoderKind::Vaapi => vec!["-vaapi_device".into(), "/dev/dri/renderD128".into()],
         EncoderKind::Qsv => vec![
             "-init_hw_device".into(),
             "qsv=qsv".into(),
             "-filter_hw_device".into(),
             "qsv".into(),
-            "-hwaccel".into(),
-            "qsv".into(),
         ],
-        _ => {
-            if hw_video_disabled() {
-                Vec::new()
-            } else {
-                vec!["-hwaccel".into(), "auto".into()]
-            }
-        }
+        _ => Vec::new(),
     }
 }
 
@@ -145,8 +131,56 @@ pub(super) fn finalize_vf(kind: EncoderKind, vf: &str) -> String {
     }
 }
 
-/// Codec, preset, tuning, and pix_fmt for the chosen encoder.
-pub(super) fn encoder_codec_args(
+pub(super) fn encoder_codec_args_file(
+    kind: EncoderKind,
+    fps_str: &str,
+    bitrate_str: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-r".into(),
+        fps_str.into(),
+        "-c:v".into(),
+        kind.name().into(),
+    ];
+
+    match kind {
+        EncoderKind::Libx264 => {
+            args.extend(["-preset".into(), "ultrafast".into()]);
+            args.extend(["-x264opts".into(), "bframes=0".into()]);
+            args.extend(["-threads".into(), "4".into()]);
+        }
+        EncoderKind::Nvenc => {
+            args.extend(["-preset".into(), "p1".into()]);
+            args.extend(["-rc".into(), "vbr".into()]);
+            args.extend(["-forced-idr".into(), "1".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
+        }
+        EncoderKind::Amf => {
+            args.extend(["-usage".into(), "lowlatency".into()]);
+            args.extend(["-quality".into(), "speed".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
+        }
+        EncoderKind::Vaapi => {
+            args.extend(["-rc_mode".into(), "VBR".into()]);
+            args.extend(["-bf".into(), "0".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
+        }
+        EncoderKind::Qsv => {
+            args.extend(["-preset".into(), "veryfast".into()]);
+            args.extend(["-look_ahead".into(), "0".into()]);
+            args.extend(["-bf".into(), "0".into()]);
+            args.extend(["-b:v".into(), bitrate_str.into()]);
+        }
+    }
+
+    if !matches!(kind, EncoderKind::Vaapi | EncoderKind::Qsv) {
+        args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+    }
+
+    args
+}
+
+pub(super) fn encoder_codec_args_live(
     kind: EncoderKind,
     fps_str: &str,
     bitrate_str: &str,
@@ -161,27 +195,27 @@ pub(super) fn encoder_codec_args(
         gop,
         "-c:v".into(),
         kind.name().into(),
-        "-b:v".into(),
-        bitrate_str.into(),
     ];
 
     match kind {
         EncoderKind::Nvenc => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "p1".into()]);
-            args.extend(["-tune".into(), "ll".into()]);
             args.extend(["-rc".into(), "vbr".into()]);
             args.extend(["-forced-idr".into(), "1".into()]);
-            args.extend(["-no-scenecut".into(), "1".into()]);
         }
         EncoderKind::Amf => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-usage".into(), "lowlatency".into()]);
             args.extend(["-quality".into(), "speed".into()]);
         }
         EncoderKind::Vaapi => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-rc_mode".into(), "VBR".into()]);
             args.extend(["-bf".into(), "0".into()]);
         }
         EncoderKind::Qsv => {
+            args.extend(["-b:v".into(), bitrate_str.into()]);
             args.extend(["-preset".into(), "veryfast".into()]);
             args.extend(["-look_ahead".into(), "0".into()]);
             args.extend(["-bf".into(), "0".into()]);
@@ -189,12 +223,11 @@ pub(super) fn encoder_codec_args(
         EncoderKind::Libx264 => {
             args.extend(["-preset".into(), "ultrafast".into()]);
             args.extend(["-tune".into(), "zerolatency".into()]);
-            args.extend(["-x264-params".into(), "bframes=0:no-scenecut=1".into()]);
+            args.extend(["-crf".into(), "23".into()]);
+            args.extend(["-x264-params".into(), "bframes=0".into()]);
         }
     }
 
-    // -pix_fmt only applies to software-output encoders; VAAPI/QSV write GPU
-    // surfaces described by the filter chain above.
     if !matches!(kind, EncoderKind::Vaapi | EncoderKind::Qsv) {
         args.extend(["-pix_fmt".into(), "yuv420p".into()]);
     }
@@ -214,11 +247,9 @@ fn run_encode(
     args.extend(hwaccel_input_args(kind));
     args.extend(["-i".into(), input.to_string_lossy().into_owned()]);
     args.extend(["-vf".into(), finalize_vf(kind, vf)]);
-    args.extend(encoder_codec_args(kind, fps_str, bitrate_str));
+    args.extend(encoder_codec_args_file(kind, fps_str, bitrate_str));
     args.extend([
         "-an".into(),
-        "-t".into(),
-        "30".into(),
         "-f".into(),
         "h264".into(),
         output.to_string_lossy().into_owned(),

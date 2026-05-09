@@ -28,8 +28,6 @@ export struct AioData {
     rotation: int,
     theme-index: int,
     loop-interval: int,
-    custom-image-filename: string,
-    has-custom-image: bool,
 }
 
 component AioCard inherits Card {
@@ -49,8 +47,6 @@ component AioCard inherits Card {
     callback set-rotation(string, int);
     callback set-theme-index(string, int);
     callback set-loop-interval(string, int);
-    callback pick-image(string);
-    callback clear-image(string);
 
     property <int> live-brightness: root.aio.brightness;
     property <int> live-loop-interval: root.aio.loop-interval;
@@ -271,31 +267,6 @@ component AioCard inherits Card {
             }
         }
 
-        Rectangle { height: 1px; background: Theme.border; }
-        VerticalLayout {
-            spacing: 6px;
-            Text { text: "Custom Image"; font-size: 12px; font-weight: 600; color: Theme.text-primary; }
-            Text {
-                text: root.aio.has-custom-image
-                    ? "Current: \{root.aio.custom-image-filename}"
-                    : "No custom image uploaded. Upload a 480×480 JPEG (≤20 KB).";
-                font-size: 11px;
-                color: Theme.text-secondary;
-                wrap: word-wrap;
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                Button {
-                    text: "Upload image…";
-                    clicked => { root.pick-image(root.aio.device-id); }
-                }
-                Button {
-                    text: "Clear";
-                    enabled: root.aio.has-custom-image;
-                    clicked => { root.clear-image(root.aio.device-id); }
-                }
-            }
-        }
     }
 }
 
@@ -316,8 +287,6 @@ export component AioPage inherits VerticalLayout {
     callback set-rotation(string, int);
     callback set-theme-index(string, int);
     callback set-loop-interval(string, int);
-    callback pick-image(string);
-    callback clear-image(string);
     callback save-config();
 
     PageHeader {
@@ -363,8 +332,6 @@ export component AioPage inherits VerticalLayout {
                 set-rotation(id, v) => { root.set-rotation(id, v); }
                 set-theme-index(id, v) => { root.set-theme-index(id, v); }
                 set-loop-interval(id, v) => { root.set-loop-interval(id, v); }
-                pick-image(id) => { root.pick-image(id); }
-                clear-image(id) => { root.clear-image(id); }
             }
         }
     }

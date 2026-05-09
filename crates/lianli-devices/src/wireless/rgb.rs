@@ -1,6 +1,5 @@
 use super::controller::WirelessController;
-use super::transport::with_transport_recovery;
-use super::{RF_DATA_SIZE, RF_SELECT, RF_SET_RGB, TX_IDS};
+use super::{RF_DATA_SIZE, RF_SELECT, RF_SET_RGB};
 use anyhow::{Context, Result};
 use std::thread;
 use std::time::Duration;
@@ -77,8 +76,6 @@ impl WirelessController {
         effect_index: &[u8; 4],
         header_repeats: u8,
     ) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX device not connected")?;
-
         let device = self
             .discovered_devices
             .lock()
@@ -95,7 +92,7 @@ impl WirelessController {
         let total_pk_num = (compressed.len() as f64 / LZO_RF_VALID_LEN as f64).ceil() as u8;
 
         let mut packets_sent: u8 = 0;
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             let mut offset: usize = 0;
             let mut index: u8 = 0;
             while offset < compressed.len() || index == 0 {
@@ -145,6 +142,10 @@ impl WirelessController {
             packets_sent = index;
             Ok(())
         })?;
+
+        self.desired_effects
+            .lock()
+            .insert(device.mac, *effect_index);
 
         debug!(
             "Sent RGB to {} ({} frame(s), {} LEDs, {} compressed, {} packets, {}ms interval)",

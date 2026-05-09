@@ -125,8 +125,6 @@ export component MainWindow inherits Window {
     callback aio-set-rotation(string, int);
     callback aio-set-theme-index(string, int);
     callback aio-set-loop-interval(string, int);
-    callback aio-pick-image(string);
-    callback aio-clear-image(string);
 
     // Fan callbacks
     callback fan-add-curve();
@@ -256,8 +254,6 @@ export component MainWindow inherits Window {
                 set-rotation(id, v) => { root.aio-set-rotation(id, v); }
                 set-theme-index(id, v) => { root.aio-set-theme-index(id, v); }
                 set-loop-interval(id, v) => { root.aio-set-loop-interval(id, v); }
-                pick-image(id) => { root.aio-pick-image(id); }
-                clear-image(id) => { root.aio-clear-image(id); }
                 save-config => { root.save-config(); }
             }
 

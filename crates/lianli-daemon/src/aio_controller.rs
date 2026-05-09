@@ -13,11 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 const TICK: Duration = Duration::from_secs(1);
-const KEEPALIVE: Duration = Duration::from_secs(5);
 
 pub struct AioController {
     wireless: Arc<WirelessController>,
@@ -28,20 +27,26 @@ pub struct AioController {
 
 struct State {
     config: AppConfig,
+    needs_reinit: bool,
 }
 
 impl AioController {
     pub fn new(wireless: Arc<WirelessController>, config: AppConfig) -> Self {
         Self {
             wireless,
-            state: Arc::new(Mutex::new(State { config })),
+            state: Arc::new(Mutex::new(State {
+                config,
+                needs_reinit: false,
+            })),
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread: None,
         }
     }
 
     pub fn set_config(&self, config: AppConfig) {
-        self.state.lock().config = config;
+        let mut state = self.state.lock();
+        state.config = config;
+        state.needs_reinit = true;
     }
 
     pub fn start(&mut self) {
@@ -74,13 +79,17 @@ impl Drop for AioController {
 fn run(wireless: Arc<WirelessController>, state: Arc<Mutex<State>>, stop_flag: Arc<AtomicBool>) {
     let all_sensors = enumerate_sensors();
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
-    let mut last_sent: HashMap<[u8; 6], [u8; AIO_PARAM_LEN]> = HashMap::new();
-    let mut last_sent_at: HashMap<[u8; 6], Instant> = HashMap::new();
     let mut switched: HashSet<[u8; 6]> = HashSet::new();
-    let mut applied_image: HashMap<[u8; 6], std::path::PathBuf> = HashMap::new();
 
     while !stop_flag.load(Ordering::Relaxed) {
-        let cfg = state.lock().config.clone();
+        let cfg = {
+            let mut s = state.lock();
+            if s.needs_reinit {
+                switched.clear();
+                s.needs_reinit = false;
+            }
+            s.config.clone()
+        };
         let curves: HashMap<String, FanCurve> = cfg
             .fan_curves
             .iter()
@@ -114,28 +123,8 @@ fn run(wireless: Arc<WirelessController>, state: Arc<Mutex<State>>, stop_flag: A
             }
 
             let param = build_aio_param(aio_cfg, device, &curves, &mut sensor_cache, &all_sensors);
-            let now = Instant::now();
-            let needs_send = match last_sent.get(&device.mac) {
-                None => true,
-                Some(prev) => {
-                    *prev != param
-                        || last_sent_at
-                            .get(&device.mac)
-                            .map(|t| now.duration_since(*t) >= KEEPALIVE)
-                            .unwrap_or(true)
-                }
-            };
-
-            if needs_send {
-                match wireless.set_aio_params(&device.mac, &param) {
-                    Ok(()) => {
-                        last_sent.insert(device.mac, param);
-                        last_sent_at.insert(device.mac, now);
-                    }
-                    Err(e) => {
-                        warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
-                    }
-                }
+            if let Err(e) = wireless.set_aio_params(&device.mac, &param) {
+                warn!("AIO {}: set_aio_params failed: {e:#}", device.mac_str());
             }
 
             let mut fan_pwm = [0u8; 4];
@@ -164,45 +153,10 @@ fn run(wireless: Arc<WirelessController>, state: Arc<Mutex<State>>, stop_flag: A
             if let Err(e) = wireless.set_fan_speeds_by_mac(&device.mac, &fan_pwm) {
                 warn!("AIO {}: set_fan_speeds failed: {e:#}", device.mac_str());
             }
-
-            match &aio_cfg.custom_image_path {
-                Some(path) if applied_image.get(&device.mac) != Some(path) => {
-                    match lianli_media::image::encode_aio_image(path) {
-                        Ok(bytes) => match wireless.send_aio_pic(&device.mac, &bytes) {
-                            Ok(()) => {
-                                info!(
-                                    "AIO {}: custom image applied ({})",
-                                    device.mac_str(),
-                                    path.display()
-                                );
-                                applied_image.insert(device.mac, path.clone());
-                            }
-                            Err(e) => warn!("AIO {}: send_aio_pic failed: {e:#}", device.mac_str()),
-                        },
-                        Err(e) => warn!(
-                            "AIO {}: encode_aio_image({}) failed: {e:#}",
-                            device.mac_str(),
-                            path.display()
-                        ),
-                    }
-                }
-                None if applied_image.remove(&device.mac).is_some() => {
-                    if let Err(e) = wireless.switch_to_wireless_theme(&device.mac) {
-                        warn!(
-                            "AIO {}: switch_to_wireless_theme (clear image) failed: {e:#}",
-                            device.mac_str()
-                        );
-                    }
-                }
-                _ => {}
-            }
         }
 
         let live_macs: HashSet<[u8; 6]> = devices.iter().map(|d| d.mac).collect();
-        last_sent.retain(|m, _| live_macs.contains(m));
-        last_sent_at.retain(|m, _| live_macs.contains(m));
         switched.retain(|m| live_macs.contains(m));
-        applied_image.retain(|m, _| live_macs.contains(m));
 
         thread::sleep(TICK);
     }

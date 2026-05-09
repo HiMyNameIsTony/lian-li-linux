@@ -5,7 +5,7 @@ use slint::ComponentHandle;
 
 pub(crate) fn wire_aio_callbacks(
     window: &MainWindow,
-    backend: &backend::BackendHandle,
+    _backend: &backend::BackendHandle,
     shared: &Shared,
 ) {
     use lianli_shared::aio::AioConfig;
@@ -223,59 +223,6 @@ pub(crate) fn wire_aio_callbacks(
             if changed {
                 mark_dirty(&weak);
             }
-        });
-    }
-
-    {
-        let shared = shared.clone();
-        let weak = window.as_weak();
-        let tx = backend.tx.clone();
-        window.on_aio_pick_image(move |dev_id| {
-            let dev_id = dev_id.to_string();
-            let weak2 = weak.clone();
-            let shared2 = shared.clone();
-            let tx2 = tx.clone();
-            std::thread::spawn(move || {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Image", &["jpg", "jpeg", "png", "bmp", "webp"])
-                    .pick_file()
-                else {
-                    return;
-                };
-                let cfg_snapshot = {
-                    let mut state = shared2.lock().unwrap();
-                    if let Some(cfg) = state.config.as_mut() {
-                        let entry = cfg.aio.entry(dev_id.clone()).or_default();
-                        entry.custom_image_path = Some(path);
-                    }
-                    state.config.clone()
-                };
-                if let Some(cfg) = cfg_snapshot {
-                    let _ = tx2.send(backend::BackendCommand::SaveConfig(cfg));
-                }
-                crate::refresh_aio_ui(&weak2, &shared2);
-            });
-        });
-    }
-
-    {
-        let shared = shared.clone();
-        let weak = window.as_weak();
-        let tx = backend.tx.clone();
-        window.on_aio_clear_image(move |dev_id| {
-            let dev_id = dev_id.to_string();
-            let cfg_snapshot = {
-                let mut state = shared.lock().unwrap();
-                if let Some(cfg) = state.config.as_mut() {
-                    let entry = cfg.aio.entry(dev_id.clone()).or_default();
-                    entry.custom_image_path = None;
-                }
-                state.config.clone()
-            };
-            if let Some(cfg) = cfg_snapshot {
-                let _ = tx.send(backend::BackendCommand::SaveConfig(cfg));
-            }
-            crate::refresh_aio_ui(&weak, &shared);
         });
     }
 }

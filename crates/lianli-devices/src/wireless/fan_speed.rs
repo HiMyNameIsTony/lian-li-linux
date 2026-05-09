@@ -1,10 +1,7 @@
 use super::controller::WirelessController;
 use super::discovery::DiscoveredDevice;
 use super::fan_type::WirelessFanType;
-use super::transport::with_transport_recovery;
-use super::{
-    RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, TX_IDS, USB_CMD_SEND_RF,
-};
+use super::{RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, USB_CMD_SEND_RF};
 use anyhow::{Context, Result};
 use lianli_transport::usb::USB_TIMEOUT;
 use std::thread;
@@ -28,8 +25,6 @@ impl WirelessController {
     /// [21-239]= Reserved
     /// ```
     pub fn set_fan_speeds_by_mac(&self, mac: &[u8; 6], fan_pwm: &[u8; 4]) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX device not connected")?;
-
         let devices = self.discovered_devices.lock();
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
@@ -75,7 +70,7 @@ impl WirelessController {
         rf_data[16] = seq_index;
         rf_data[17..21].copy_from_slice(&pwm);
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             for chunk_idx in 0..RF_CHUNKS as u8 {
                 let mut packet = vec![0u8; 64];
                 packet[0] = USB_CMD_SEND_RF;

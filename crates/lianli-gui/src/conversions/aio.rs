@@ -142,13 +142,5 @@ fn aio_to_slint(
         rotation: cfg.rotation as i32,
         theme_index: cfg.theme_index as i32,
         loop_interval: cfg.loop_interval as i32,
-        custom_image_filename: SharedString::from(
-            cfg.custom_image_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                .unwrap_or(""),
-        ),
-        has_custom_image: cfg.custom_image_path.is_some(),
     }
 }

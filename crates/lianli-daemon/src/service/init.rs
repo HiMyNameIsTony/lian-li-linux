@@ -47,7 +47,13 @@ impl ServiceManager {
             wired_devices.len()
         );
 
-        let mut controller = FanController::new(fan_config, fan_curves, wireless, wired_devices);
+        let mut controller = FanController::new(
+            fan_config,
+            fan_curves,
+            wireless,
+            wired_devices,
+            self.tx.clone(),
+        );
         controller.start();
         self.fan_controller = Some(controller);
     }
@@ -106,6 +112,57 @@ impl ServiceManager {
                 self.ipc_state.lock().config = Some(snapshot);
             }
         }
+    }
+
+    pub(super) fn enumerate_wired_controller_ids(&self) -> std::collections::HashSet<String> {
+        use lianli_shared::device_id::DeviceFamily;
+        use std::collections::HashSet;
+        fn is_wired_controller(family: DeviceFamily) -> bool {
+            lianli_shared::device_id::uses_hid(family)
+                || matches!(family, DeviceFamily::UniversalScreenLighting)
+        }
+        if self.use_rusb() {
+            enumerate_devices()
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter(|det| is_wired_controller(det.family))
+                .map(|det| Self::rusb_device_id(&det))
+                .collect()
+        } else {
+            let mut set: HashSet<String> = match hidapi::HidApi::new() {
+                Ok(api) => lianli_devices::detect::enumerate_hid_devices(&api)
+                    .into_iter()
+                    .filter(|det| lianli_shared::device_id::uses_hid(det.family))
+                    .map(|det| det.device_id())
+                    .collect(),
+                Err(_) => return HashSet::new(),
+            };
+            if let Ok(devs) = enumerate_devices() {
+                set.extend(
+                    devs.into_iter()
+                        .filter(|det| matches!(det.family, DeviceFamily::UniversalScreenLighting))
+                        .map(|det| Self::rusb_device_id(&det)),
+                );
+            }
+            set
+        }
+    }
+
+    pub(super) fn check_wired_hotplug(&mut self) {
+        let current = self.enumerate_wired_controller_ids();
+        if current == self.last_wired_hid_ids {
+            return;
+        }
+
+        let added = current.difference(&self.last_wired_hid_ids).count();
+        let removed = self.last_wired_hid_ids.difference(&current).count();
+        info!("Wired device topology changed (+{added} -{removed}): re-initializing");
+
+        self.hid_backends.retain(|k, _| current.contains(k));
+        self.init_wired_devices();
+        self.start_fan_control();
+        self.last_wired_hid_ids = current;
     }
 
     /// Initialize all wired HID devices (fan + RGB) in a single pass.
@@ -192,6 +249,7 @@ impl ServiceManager {
         let arc = Arc::new(fan_devices);
         self.wired_fan_devices = Arc::clone(&arc);
         self.init_rgb_controller_from(wired_rgb);
+        self.last_wired_hid_ids = self.enumerate_wired_controller_ids();
     }
 
     fn init_usb_bulk_rgb_devices(
