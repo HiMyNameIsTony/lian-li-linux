@@ -557,21 +557,21 @@ fn pattern_is_animated(mode: RgbMode) -> bool {
     matches!(mode, RgbMode::Breathing)
 }
 
-/// Global frame budget for composite uploads. 120 frames × 100 ms = 12 s loop.
+/// Global frame budget for composite uploads. 480 frames × 25 ms = 12 s loop.
 ///
-/// Why 100 ms per frame and not something faster: the SL-Infinity firmware
-/// appears to enforce a minimum playback interval (~21 ms observed) and
-/// silently clamps anything below it, which made small interval_ms values
-/// play much faster than the daemon intended. Staying well above that
-/// floor keeps the math honest. 10 fps is plenty for breathing/pulsing.
+/// 25 ms (~40 fps) sits just above the firmware's ~20 ms playback floor —
+/// fast enough for visually smooth fades, slow enough to leave headroom
+/// before the firmware clamps. The daemon-side interval encoder pre-scales
+/// by 8/5 to compensate for the firmware's internal 0.625× factor, so
+/// `COMPOSITE_INTERVAL_MS` is in real milliseconds.
 ///
-/// 12 s is wide enough that slow patterns like Breathing can give
-/// properly relaxed cadences (1 cycle / 12s ≈ 5 BPM, like a meditative
-/// exhale) at the slowest speed. LZO compresses the highly repetitive
-/// breathing/static frames very efficiently so even hundreds of frames
-/// stay within a few KB compressed.
-const COMPOSITE_FRAMES: usize = 120;
-const COMPOSITE_INTERVAL_MS: u16 = 100;
+/// 12 s is wide enough that slow patterns like Breathing can give properly
+/// relaxed cadences (1 cycle / 12s ≈ 5 BPM, like a meditative exhale) at
+/// the slowest speed. LZO compresses the highly repetitive breathing/pulse
+/// frames very efficiently so even hundreds of frames stay within a few
+/// KB compressed.
+const COMPOSITE_FRAMES: usize = 480;
+const COMPOSITE_INTERVAL_MS: u16 = 25;
 
 /// Render a composite animation covering every animated sub-zone of a
 /// wireless device. Non-animated zones contribute their current `led_state`
@@ -615,7 +615,7 @@ fn paint_breathing(
     // Speed → integer cycles-per-window. Must be integer so the animation
     // wraps cleanly at frame N (otherwise the loop restarts mid-pulse and
     // looks broken). Window is COMPOSITE_FRAMES × COMPOSITE_INTERVAL_MS
-    // ≈ 2 s, so cycles == frequency in Hz × 2.
+    // = 12 s, so frequency_Hz = cycles / 12.
     let cycles = breathing_cycles_per_window(effect.speed) as f32;
     let n = frames.len() as f32;
     // Capture the slice's per-LED base colors from frame 0 (which still
@@ -642,7 +642,7 @@ fn paint_breathing(
 }
 
 /// Speed → integer breathing cycles per ~12-second composite window.
-/// Must be integer (and ideally evenly divide COMPOSITE_FRAMES = 120) so
+/// Must be integer (and ideally evenly divide COMPOSITE_FRAMES = 480) so
 /// the animation wraps cleanly at the frame boundary.
 ///
 /// Mapped onto natural breathing/pulse cadences:

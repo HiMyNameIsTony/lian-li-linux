@@ -119,12 +119,23 @@ impl WirelessController {
                     rf_data[25] = (total_frames >> 8) as u8;
                     rf_data[26] = (total_frames & 0xFF) as u8;
                     rf_data[27] = led_num;
-                    // interval encoding (matches L-Connect 3):
-                    //   bytes 32-33: integer milliseconds (BE u16)
-                    //   byte 34:    sub-millisecond fraction × 100 (0..99)
-                    // We work in whole-ms units, so byte 34 stays 0.
-                    rf_data[32] = (interval_ms >> 8) as u8;
-                    rf_data[33] = (interval_ms & 0xFF) as u8;
+                    // interval encoding:
+                    //   bytes 32-33: integer "interval units" (BE u16)
+                    //   byte 34:    sub-unit fraction × 100 (0..99)
+                    //
+                    // Empirical: the SL-Infinity firmware plays at
+                    // ~0.625 × the value sent (i.e. one "interval unit"
+                    // ≈ 0.625 ms, NOT 1 ms). Verified across three very
+                    // different (frame_count, interval_ms) pairs — all
+                    // produced the same 7.5s per loop, matching
+                    // total_frame × interval_ms × 0.625.
+                    //
+                    // To make `interval_ms` mean what callers expect (real
+                    // milliseconds), pre-multiply by 1/0.625 = 1.6 = 8/5
+                    // before encoding. Saturate at u16::MAX.
+                    let scaled = ((interval_ms as u32 * 8 + 4) / 5).min(u16::MAX as u32) as u16;
+                    rf_data[32] = (scaled >> 8) as u8;
+                    rf_data[33] = (scaled & 0xFF) as u8;
                     rf_data[34] = 0;
 
                     let repeats = header_repeats.max(1);

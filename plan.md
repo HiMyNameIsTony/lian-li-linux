@@ -7,17 +7,80 @@ multi-frame animation, uploaded once to the dongle, then played back
 autonomously by the firmware. Replaces the current "single static frame"
 behavior for all non-Direct modes.
 
+## Pick up here tomorrow
+
+**Visual quality is good**; the remaining UX issue is upload latency. When
+OpenRGB's `UpdateMode` packet arrives, `handle_update_mode` in
+`crates/lianli-daemon/src/openrgb_server.rs` loops over every zone of the
+device and calls `RgbController::set_effect` per zone. Each call rebuilds and
+uploads the whole 480-frame composite — so a 5-sub-zone bank becomes 5 full
+uploads back-to-back. User reported "having to wait a few seconds for the
+daemon to compile and send over the whole animation" and diagnosed it as
+"sending each zone as it compiles a new one, instead of sending [once at the
+end]".
+
+**Fix**: add a batched `apply_effects(&mut self, device_id, &[(u8, RgbEffect)])`
+method on `RgbController` (parallel to the existing `apply_direct_zones`),
+which:
+1. For wireless: updates `state.sub_zone_effects` and `state.led_state` for
+   every (zone, effect) pair in one pass, then calls
+   `render_composite_frames` + `send_rgb_frames` exactly once.
+2. For wired: falls back to per-zone `set_effect` (no batching benefit
+   since wired protocols address zones directly).
+
+Then change `handle_update_mode` in `openrgb_server.rs` to collect all
+`(zone_idx, effect)` pairs into a `Vec` and call `apply_effects` once,
+instead of looping `set_effect`.
+
+I started writing this in the rgb_controller `mod.rs` (between `set_effect`
+and `set_direct_colors`) and reverted it — start fresh tomorrow.
+
 ## Context — what already works
 
-- Breathing: rendered as 30-frame sine modulation, uploaded via
-  `send_rgb_frames` at 33ms interval. Verified pulsing on hardware.
-- Sub-zones: each fan exposes 5 zones to OpenRGB
+- **Breathing**: per-LED-color-preserving sine modulation, rendered as a
+  global composite (480 frames × 25ms = 12s loop @ ~40 fps). Verified
+  smooth on hardware across all five speeds.
+- **Composite renderer** (formerly section 7 below): `render_composite_frames`
+  in `rgb_controller/mod.rs` paints all active sub-zones into one frame
+  sequence and uploads once. Sub-zones with no effect contribute their
+  static `led_state` slice; non-animated zones (Static / Off) bake into
+  `led_state` and don't enter the composite.
+- **Per-LED color preservation across mode changes**: `set_effect` for
+  animated modes preserves any non-blank `led_state` slice (so "set per-LED
+  via Direct, then switch to Breathing" makes each LED breathe its own
+  color). Only seeds with the effect's default color when the slice is
+  all-black.
+- **Sub-zones**: each fan exposes 5 zones to OpenRGB
   (Blades / Left Outer / Left Inner / Right Outer / Right Inner). LED slot
   ranges per fan: `[0..8) [8..18) [18..26) [26..36) [36..44)`.
-- Mode metadata fix: `colors_min > 0` modes now advertise 1 default color so
-  the GUI doesn't crash.
-- v4 protocol confirmed sufficient. v5 doesn't add per-segment effects, alt
-  names are for keyboard localization, zone flags are unrelated.
+- **Mode metadata fix**: `colors_min > 0` modes now advertise 1 default
+  color so the GUI doesn't crash.
+- **v4 protocol** confirmed sufficient. v5 doesn't add per-segment effects;
+  alt names are for keyboard localization; zone flags are unrelated.
+
+## Discovered firmware quirks
+
+- **Interval scaling factor 0.625**: the firmware plays animations at
+  `interval_ms × 0.625` per frame, regardless of value. Verified across
+  three (frame_count, interval_ms) pairs that all produced identical 7.5s
+  loops — math: `frames × interval × 0.625`. Cause unknown; one "interval
+  unit" is effectively ~0.625 ms instead of 1 ms.
+  **Daemon-side fix** (already shipped, see `wireless/rgb.rs`): pre-multiply
+  `interval_ms` by 8/5 = 1.6 before encoding. Callers can now pass real
+  milliseconds and get the playback rate they expect.
+- **Interval floor ~20 ms**: pushing below this seems to cap rather than
+  scale further; 25 ms is the chosen safe minimum for smooth animations.
+- **Composite frame budget**: 480 frames × 25 ms = 12s loop, ~40 fps. Wide
+  enough that speed=0 = 1 cycle / 12s ≈ 5 BPM (meditative); fast enough
+  that fades look continuous. LZO compresses the highly-repetitive
+  breathing frames very efficiently — even hundreds of frames compress to
+  a few KB.
+- **Speed → cycles mapping for Breathing** (must integer-divide 480):
+  - speed 0 → 1 cycle / window  ≈ 5 BPM
+  - speed 1 → 2 cycles          ≈ 10 BPM
+  - speed 2 → 4 cycles          ≈ 20 BPM
+  - speed 3 → 6 cycles          ≈ 30 BPM
+  - speed 4 → 12 cycles         ≈ 60 BPM
 
 ## Approach — implement one pattern at a time
 
@@ -49,17 +112,20 @@ fn render_frames(
 Each renderer mutates only `[slice_start..slice_start + slice_len)`; other LEDs
 in each frame are copied from `base_state`.
 
-## Speed → interval table (per pattern)
+## Speed → cycles-per-window table (per pattern)
 
-Speed is 0–4 (0 = slowest, 4 = fastest):
+With the composite renderer settled at a fixed 480 × 25ms = 12s window, all
+patterns now express speed as **integer cycles per window** (not interval).
+Speed is 0–4 (0 = slowest, 4 = fastest); cycles must integer-divide 480 so
+the loop wraps cleanly at the frame boundary.
 
-| Pattern | s=0 | 1 | 2 | 3 | 4 | total_frames |
-|---|---|---|---|---|---|---|
-| Breathing | 67 | 50 | 33 | 22 | 17 | 30 |
-| Flashing | 500 | 250 | 125 | 67 | 33 | 4 |
-| Rainbow / Morph / Cycle | 50 | 40 | 33 | 25 | 17 | 60 |
-| Chase / ChaseFade | dur/N×slice_len pacing | – | – | – | – | slice_len × 2 |
-| Random Flicker | 100 | 67 | 50 | 33 | 17 | 30 |
+| Pattern | s=0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| Breathing | 1 | 2 | 4 | 6 | 12 |
+| Flashing | 2 | 4 | 8 | 12 | 24 |
+| Rainbow / Morph / Cycle | 1 | 2 | 4 | 6 | 12 |
+| Chase / ChaseFade | TBD — natural cycle = slice_len, multiple repeats per window |
+| Random Flicker | random — different design |
 
 ## v4 mode metadata per pattern
 
@@ -94,6 +160,13 @@ sub-zone — no up/down concept).
 ## Implementation order
 
 Each step ends with a hardware-verify pause + this doc update.
+
+### 0. Batched effect upload (queued — see "Pick up here tomorrow")
+
+Add `apply_effects` to `RgbController`, switch `handle_update_mode` to use
+it. Cuts upload latency by Nx where N = number of sub-zones receiving the
+mode. Test: switching to Breathing should produce ONE upload log line
+instead of five.
 
 ### 1. Refactor existing Breathing onto renderer-interface signature
 
@@ -143,24 +216,16 @@ Chase with an exponential decay tail.
 **Learn**: the LZO-compressed frame size gets bigger because more LEDs
 have non-zero values — verify upload fits.
 
-### 7. Per-sub-zone composition
+### 7. Per-sub-zone composition — DONE
 
-Currently each `set_effect` call per sub-zone re-renders + uploads. With
-multiple sub-zones in different modes, each upload only animates ONE
-sub-zone (others stay frozen).
+Implemented as `render_composite_frames` + `state.sub_zone_effects`
+HashMap. Each `set_effect` updates the map and re-renders the global 480 ×
+25ms composite. Each sub-zone's natural cycle is fitted into the 12s
+window (cycles per window per the speed table above) so all animations
+loop cleanly at the frame boundary.
 
-Goal: render one composite frame sequence covering all sub-zones'
-animations simultaneously, upload once.
-
-Approach: keep a per-bank `EffectMap = HashMap<sub_zone_idx, RgbEffect>`.
-On any `set_effect`, update the map, then re-render the composite (60 frame
-shared loop, each sub-zone's animation fitted into that window with
-period-extension or repetition). Upload once.
-
-Tricky bit: different patterns have different natural cycle lengths
-(Breathing 1s, Rainbow 2s, Chase = slice_len). Need to pick a global LCM
-period, then each sub-zone repeats its cycle within it. Or accept some
-patterns running at non-natural speeds for compositional purposes.
+Cost: every `set_effect` rebuilds + uploads the full composite. Mitigated
+by step 0 (batched upload) for the multi-zone-update case.
 
 ### 8. Random Flicker
 
