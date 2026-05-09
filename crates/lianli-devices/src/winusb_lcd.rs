@@ -163,11 +163,13 @@ impl WinUsbLcdDevice {
 
     /// Stream a raw H264 file in chunks via StartPlay (0x79).
     /// Loops the file if `looping` is true. Runs until `stop` is set.
+    /// Paces each chunk at `max(33ms, 1000ms / fps)` to avoid firmware overrun.
     pub fn stream_h264(
         &mut self,
         path: &std::path::Path,
         looping: bool,
         stop: &std::sync::atomic::AtomicBool,
+        fps: f32,
     ) -> Result<()> {
         use std::io::{Read, Seek};
         use std::sync::atomic::Ordering;
@@ -178,6 +180,8 @@ impl WinUsbLcdDevice {
 
         let mut file = std::fs::File::open(path).context("opening h264 file")?;
         let mut file_buf = vec![0u8; Self::H264_CHUNK_SIZE];
+        let interval = chunk_interval(fps);
+        let mut next_deadline = std::time::Instant::now() + interval;
 
         loop {
             let n = file.read(&mut file_buf).context("reading h264 chunk")?;
@@ -199,6 +203,7 @@ impl WinUsbLcdDevice {
             };
 
             self.send_h264_chunk(&file_buf[..n], is_last)?;
+            sleep_until(&mut next_deadline, interval);
         }
 
         self.transport.read_flush();
@@ -211,6 +216,7 @@ impl WinUsbLcdDevice {
         &mut self,
         reader: &mut dyn std::io::Read,
         stop: &std::sync::atomic::AtomicBool,
+        fps: f32,
     ) -> Result<()> {
         use std::sync::atomic::Ordering;
 
@@ -219,6 +225,8 @@ impl WinUsbLcdDevice {
         }
 
         let mut buf = vec![0u8; Self::H264_CHUNK_SIZE];
+        let interval = chunk_interval(fps);
+        let mut next_deadline = std::time::Instant::now() + interval;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -228,6 +236,7 @@ impl WinUsbLcdDevice {
                 break;
             }
             self.send_h264_chunk(&buf[..n], false)?;
+            sleep_until(&mut next_deadline, interval);
         }
 
         self.transport.read_flush();
@@ -255,8 +264,6 @@ impl WinUsbLcdDevice {
         }
 
         let resp = self.read_response("h264 chunk", LCD_READ_TIMEOUT);
-
-        std::thread::sleep(Duration::from_millis(30));
 
         if let Some(buf) = resp {
             if buf[8] > 3 {
@@ -509,6 +516,23 @@ impl WinUsbLcdDevice {
             }
         }
         debug!("Buffer wait timed out after 2s");
+    }
+}
+
+fn chunk_interval(fps: f32) -> Duration {
+    let target = Duration::from_secs_f32(1.0 / fps.max(1.0));
+    target.max(Duration::from_millis(30))
+}
+
+fn sleep_until(next_deadline: &mut Instant, interval: Duration) {
+    let now = Instant::now();
+    if now < *next_deadline {
+        std::thread::sleep(*next_deadline - now);
+    }
+    *next_deadline += interval;
+    let now = Instant::now();
+    if *next_deadline < now {
+        *next_deadline = now + interval;
     }
 }
 

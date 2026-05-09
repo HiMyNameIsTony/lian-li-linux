@@ -207,8 +207,7 @@ impl RgbController {
             // If any sub-zone wants animation, upload a composite frame
             // sequence covering all of them. Otherwise upload a single frame
             // (cheaper) and let the firmware hold it.
-            state.effect_counter = state.effect_counter.wrapping_add(1);
-            let idx = state.effect_counter.to_be_bytes();
+            let idx = effect_index_from_state(&state.led_state);
 
             if state.sub_zone_effects.is_empty() {
                 wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
@@ -268,8 +267,7 @@ impl RgbController {
             // Direct mode supersedes any composite animation on this zone.
             state.sub_zone_effects.remove(&zone);
 
-            state.effect_counter = state.effect_counter.wrapping_add(1);
-            let idx = state.effect_counter.to_be_bytes();
+            let idx = effect_index_from_state(&state.led_state);
             wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
             return Ok(());
         }
@@ -331,8 +329,7 @@ impl RgbController {
             }
 
             if applied_any {
-                state.effect_counter = state.effect_counter.wrapping_add(1);
-                let idx = state.effect_counter.to_be_bytes();
+                let idx = effect_index_from_state(&state.led_state);
                 wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
             }
             return Ok(());
@@ -529,14 +526,12 @@ impl RgbController {
             let mut new_state = HashMap::new();
             for dev in w.devices() {
                 let device_id = format!("wireless:{}", dev.mac_str());
-                let (counter, led_state) = self
+                let led_state = self
                     .wireless_state
                     .get(&device_id)
-                    .map(|s| (s.effect_counter, Some(s.led_state.clone())))
-                    .unwrap_or((0, None));
+                    .map(|s| s.led_state.clone());
 
                 let mut state = WirelessRgbState::new(dev.mac, dev.fan_count, dev.fan_type);
-                state.effect_counter = counter;
                 if let Some(leds) = led_state {
                     if leds.len() == state.led_state.len() {
                         state.led_state = leds;
@@ -548,6 +543,20 @@ impl RgbController {
             self.wireless_state = new_state;
         }
     }
+}
+
+fn effect_index_from_state(led_state: &[[u8; 3]]) -> [u8; 4] {
+    let mut h: u32 = 0x811c_9dc5;
+    for px in led_state {
+        for &b in px {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    }
+    if h == 0 {
+        h = 1;
+    }
+    h.to_be_bytes()
 }
 
 /// Render a solid color array for a single zone from an RgbEffect.

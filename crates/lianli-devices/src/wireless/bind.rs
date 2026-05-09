@@ -1,9 +1,6 @@
 use super::controller::WirelessController;
 use super::discovery::poll_and_discover;
-use super::transport::with_transport_recovery;
-use super::{
-    RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, TX_IDS, USB_CMD_SEND_RF,
-};
+use super::{RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_PWM_CMD, RF_SELECT, USB_CMD_SEND_RF};
 use anyhow::{Context, Result};
 use lianli_transport::usb::USB_TIMEOUT;
 use std::thread;
@@ -77,7 +74,6 @@ impl WirelessController {
         target_master_mac: &[u8; 6],
         target_rx: u8,
     ) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX not connected")?;
         let device = self
             .discovered_devices
             .lock()
@@ -98,7 +94,7 @@ impl WirelessController {
         rf_data[16] = target_rx;
         rf_data[17..21].copy_from_slice(&device.current_pwm);
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             for _ in 0..6 {
                 self.send_rf_packet(handle, &device, &rf_data)?;
                 thread::sleep(Duration::from_millis(30));
@@ -135,7 +131,6 @@ impl WirelessController {
 
     /// Broadcast SaveConfig to persist device bindings to flash.
     fn save_rf_config(&self) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX not connected")?;
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
 
@@ -146,7 +141,7 @@ impl WirelessController {
         rf_data[8..14].copy_from_slice(&master_mac);
         rf_data[14] = 0xFF;
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             for _ in 0..3 {
                 for chunk_idx in 0..RF_CHUNKS as u8 {
                     let mut packet = vec![0u8; 64];

@@ -1,10 +1,6 @@
 use crate::fan::FanSpeed;
 use crate::media::SensorSourceConfig;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-
-pub const AIO_PIC_MAX_BYTES: usize = 20_480;
-pub const AIO_PIC_DIMENSION: u32 = 480;
 
 fn default_brightness() -> u8 {
     80
@@ -59,8 +55,6 @@ pub struct AioConfig {
     pub val_color: [u8; 4],
     #[serde(default = "rgba_white")]
     pub unit_color: [u8; 4],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_image_path: Option<PathBuf>,
 }
 
 fn default_cpu_load_source() -> Option<SensorSourceConfig> {
@@ -83,7 +77,6 @@ impl Default for AioConfig {
             str_color: rgba_white(),
             val_color: rgba_white(),
             unit_color: rgba_white(),
-            custom_image_path: None,
         }
     }
 }

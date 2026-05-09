@@ -1,23 +1,21 @@
 use super::controller::WirelessController;
 use super::discovery::DiscoveredDevice;
 use super::fan_type::WirelessFanType;
-use super::transport::with_transport_recovery;
 use super::{
-    AIO_PARAM_LEN, AIO_PIC_MAX_BYTES, RF_AIO_PARAMS, RF_AIO_PIC, RF_AIO_SWITCH_WIRELESS, RF_CHUNKS,
-    RF_CHUNK_SIZE, RF_DATA_SIZE, RF_SELECT, TX_IDS, USB_CMD_SEND_RF,
+    AIO_PARAM_LEN, RF_AIO_PARAMS, RF_AIO_SWITCH_WIRELESS, RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE,
+    RF_SELECT, USB_CMD_SEND_RF,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 impl WirelessController {
     /// Signal an AIO device to start honouring RF-driven theme / pump state.
     /// Must be sent once per AIO MAC after discovery, before the first `set_aio_params`.
     /// Idempotent — safe to re-invoke on reconnects.
     pub fn switch_to_wireless_theme(&self, mac: &[u8; 6]) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX device not connected")?;
         let device = self.device_by_mac_snapshot(mac)?;
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
@@ -30,7 +28,7 @@ impl WirelessController {
         rf_data[14] = device.rx_type;
         rf_data[15] = master_ch;
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             for _ in 0..10 {
                 send_rf_frame_via(handle, &device, &rf_data)?;
                 thread::sleep(Duration::from_millis(2));
@@ -46,7 +44,6 @@ impl WirelessController {
     /// values + enables, text colors, LCD brightness, rotation, theme index,
     /// loop interval.
     pub fn set_aio_params(&self, mac: &[u8; 6], aio_param: &[u8; AIO_PARAM_LEN]) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX device not connected")?;
         let device = self.device_by_mac_snapshot(mac)?;
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
@@ -62,78 +59,13 @@ impl WirelessController {
         rf_data[16] = seq_index;
         rf_data[18..18 + AIO_PARAM_LEN].copy_from_slice(aio_param);
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
-            send_rf_frame_via(handle, &device, &rf_data)
-        })?;
+        self.tx_recover(|handle| send_rf_frame_via(handle, &device, &rf_data))?;
 
         debug!(
             "set_aio_params sent to {} (pump_timer={}, theme={})",
             device.mac_str(),
             u16::from_be_bytes([aio_param[28], aio_param[29]]),
             aio_param[27]
-        );
-        Ok(())
-    }
-
-    /// Upload a JPEG to the AIO's built-in display for custom theme mode.
-    /// Must be ≤ `AIO_PIC_MAX_BYTES` bytes; should be 480×480 JPEG.
-    pub fn send_aio_pic(&self, mac: &[u8; 6], jpeg: &[u8]) -> Result<()> {
-        if jpeg.len() > AIO_PIC_MAX_BYTES {
-            bail!(
-                "AIO image {} bytes exceeds maximum {}",
-                jpeg.len(),
-                AIO_PIC_MAX_BYTES
-            );
-        }
-        if jpeg.is_empty() {
-            bail!("AIO image payload is empty");
-        }
-
-        let tx = self.tx.as_ref().context("TX device not connected")?;
-        let device = self.device_by_mac_snapshot(mac)?;
-        let master_mac = *self.master_mac.lock();
-        let master_ch = *self.master_channel.lock();
-
-        const PIC_CHUNK: usize = 220;
-        let total_len = jpeg.len() as u16;
-        let total_chunks = jpeg.len().div_ceil(PIC_CHUNK);
-
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
-            for idx in 0..total_chunks {
-                let start = idx * PIC_CHUNK;
-                let end = (start + PIC_CHUNK).min(jpeg.len());
-                let mut rf_data = vec![0u8; RF_DATA_SIZE];
-                rf_data[0] = RF_SELECT;
-                rf_data[1] = RF_AIO_PIC;
-                rf_data[2..8].copy_from_slice(&device.mac);
-                rf_data[8..14].copy_from_slice(&master_mac);
-                rf_data[14] = device.rx_type;
-                rf_data[15] = master_ch;
-                rf_data[18] = idx as u8;
-                rf_data[19..19 + (end - start)].copy_from_slice(&jpeg[start..end]);
-                send_rf_frame_via(handle, &device, &rf_data)?;
-                thread::sleep(Duration::from_millis(2));
-            }
-
-            let mut terminator = vec![0u8; RF_DATA_SIZE];
-            terminator[0] = RF_SELECT;
-            terminator[1] = RF_AIO_PIC;
-            terminator[2..8].copy_from_slice(&device.mac);
-            terminator[8..14].copy_from_slice(&master_mac);
-            terminator[14] = device.rx_type;
-            terminator[15] = master_ch;
-            terminator[18] = 0xFF;
-            terminator[19] = (total_len >> 8) as u8;
-            terminator[20] = (total_len & 0xFF) as u8;
-            send_rf_frame_via(handle, &device, &terminator)?;
-            Ok(())
-        })?;
-
-        info!(
-            "send_aio_pic sent to {}: {} bytes in {} chunks",
-            device.mac_str(),
-            total_len,
-            total_chunks
         );
         Ok(())
     }

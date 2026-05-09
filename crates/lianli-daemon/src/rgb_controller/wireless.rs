@@ -17,8 +17,6 @@ pub(super) struct WirelessRgbState {
     /// Direct-mode zones have no entry here; their colors live in
     /// `led_state` and are streamed per-frame via `send_rgb_direct`.
     pub(super) sub_zone_effects: HashMap<u8, RgbEffect>,
-    /// Monotonically increasing effect index (4 bytes, sent in RF header).
-    pub(super) effect_counter: u32,
 }
 
 impl WirelessRgbState {
@@ -37,7 +35,6 @@ impl WirelessRgbState {
             fan_type,
             led_state: vec![[0, 0, 0]; total_leds],
             sub_zone_effects: HashMap::new(),
-            effect_counter: 0,
         }
     }
 }

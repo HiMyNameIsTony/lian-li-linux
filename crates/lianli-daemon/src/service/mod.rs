@@ -31,7 +31,7 @@ mod shutdown;
 mod streaming;
 mod sync;
 
-use runtime::{parse_mac_str, ActiveTarget, LcdBackend};
+use runtime::{parse_mac_str, ActiveTarget};
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Full USB bus enumeration interval — only needed for hot-plug detection of
@@ -63,6 +63,10 @@ pub enum DaemonEvent {
     FrameFinished {
         asset: Arc<lianli_media::MediaAsset>,
     }, // A device has calculated a new frame, let's update the display
+    RecreateMedia {
+        target_index: usize,
+    },
+    ResyncWirelessRgb,
     Shutdown, // SIGINT/SIGTERM received, exit the event loop cleanly
 }
 
@@ -83,13 +87,15 @@ pub struct ServiceManager {
     /// Shared HID backends keyed by device ID — allows fan, RGB, and LCD
     /// controllers for the same physical device to share one USB handle.
     hid_backends: HashMap<String, Arc<Mutex<HidBackend>>>,
+    last_wired_hid_ids: std::collections::HashSet<String>,
     /// Cached USB device list from enumerate_devices() — refreshed every USB_ENUM_INTERVAL.
     cached_usb_devices: Vec<DeviceInfo>,
     /// Firmware string + C-command capability per AIO LCD device_id, populated
     /// when the controller attaches and surfaced through DeviceInfo.
     aio_lcd_info: HashMap<String, (Option<String>, bool)>,
     last_wireless_count: usize,
-    poll_tick: u32,
+    last_poll_mono: Instant,
+    last_poll_wall: std::time::SystemTime,
     restart_requested: bool,
     ipc_state: Arc<Mutex<DaemonState>>, // the (shared) state of the deamon. Shared between daemon itself and IPC thread.
     ipc_stop: Arc<AtomicBool>, // Flag which allows the deamon thread (on shutdown) to tell the IPC thread to stop.
@@ -121,10 +127,12 @@ impl ServiceManager {
             wired_fan_device_info: Vec::new(),
             wired_fan_devices: Arc::new(HashMap::new()),
             hid_backends: HashMap::new(),
+            last_wired_hid_ids: std::collections::HashSet::new(),
             cached_usb_devices: Vec::new(),
             aio_lcd_info: HashMap::new(),
             last_wireless_count: 0,
-            poll_tick: 0,
+            last_poll_mono: Instant::now(),
+            last_poll_wall: std::time::SystemTime::now(),
             restart_requested: false,
             ipc_state,
             ipc_stop: Arc::new(AtomicBool::new(false)),
@@ -186,6 +194,23 @@ impl ServiceManager {
     }
 
     pub fn device_poll(&mut self) {
+        let now_mono = Instant::now();
+        let now_wall = std::time::SystemTime::now();
+        let mono_elapsed = now_mono.duration_since(self.last_poll_mono);
+        let wall_elapsed = now_wall
+            .duration_since(self.last_poll_wall)
+            .unwrap_or(mono_elapsed);
+        self.last_poll_mono = now_mono;
+        self.last_poll_wall = now_wall;
+        if wall_elapsed > mono_elapsed + Duration::from_secs(5) {
+            info!(
+                "System resume detected (~{:.0}s sleep), restarting daemon",
+                (wall_elapsed - mono_elapsed).as_secs_f32()
+            );
+            self.restart_requested = true;
+            return;
+        }
+
         // Check for late wireless device discovery
         let current_wireless = self.wireless.devices().len();
         if current_wireless != self.last_wireless_count {
@@ -203,20 +228,9 @@ impl ServiceManager {
             self.last_wireless_count = current_wireless;
         }
 
+        self.check_wired_hotplug();
         self.refresh_targets();
         self.sync_ipc_telemetry();
-
-        // Check HID LCD health every other tick (~2s)
-        self.poll_tick = self.poll_tick.wrapping_add(1);
-        if self.poll_tick % 2 == 0 {
-            for target in self.targets.values_mut() {
-                if let LcdBackend::HidLcd(d) = &target.lcd {
-                    if let Err(e) = d.lock().check_and_recover_lcd() {
-                        tracing::debug!("LCD[{}] health check error: {e:#}", target.index);
-                    }
-                }
-            }
-        }
     }
 
     /// Run the daemon main loop. Returns `true` if the daemon should restart.
@@ -324,9 +338,15 @@ impl ServiceManager {
                     // Refresh USB device enumeration
                     // Wireless discovery is handled by its own RX polling thread.
                     self.refresh_usb_device_cache();
+                    if !self.wireless.is_connected() {
+                        self.try_wireless();
+                    }
                 }
                 DaemonEvent::DevicePoll => {
                     self.device_poll();
+                    if self.restart_requested {
+                        break;
+                    }
                 }
                 DaemonEvent::DisplaySwitch { device_id } => {
                     self.handle_display_switch_to_desktop(&device_id);
@@ -396,6 +416,21 @@ impl ServiceManager {
                 DaemonEvent::FrameFinished { asset } => {
                     // which worker has a new image to send?
                     self.stream_target(asset);
+                }
+                DaemonEvent::ResyncWirelessRgb => {
+                    info!("Wireless RGB drift detected, re-applying config");
+                    self.apply_rgb_config();
+                }
+                DaemonEvent::RecreateMedia { target_index } => {
+                    if let Some(asset) = self.media_assets.get(&target_index).cloned() {
+                        if let Some(target) = self.targets.get_mut(&target_index) {
+                            info!(
+                                "[devices] LCD[{}] recreating media after recovery",
+                                target.device_identity
+                            );
+                            target.swap_media(asset, self.tx.clone());
+                        }
+                    }
                 }
             }
         }

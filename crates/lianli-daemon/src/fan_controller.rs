@@ -1,3 +1,4 @@
+use crate::service::DaemonEvent;
 use anyhow::{Context, Result};
 use lianli_devices::traits::FanDevice;
 use lianli_devices::wireless::WirelessController;
@@ -5,6 +6,7 @@ use lianli_shared::fan::{FanConfig, FanCurve, FanSpeed};
 use lianli_shared::sensors::{self, ResolvedSensor, SensorInfo, SensorSource};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -17,6 +19,7 @@ pub struct FanController {
     wired_devices: Arc<HashMap<String, Box<dyn FanDevice>>>,
     stop_flag: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    daemon_tx: Option<Sender<DaemonEvent>>,
 }
 
 impl FanController {
@@ -25,6 +28,7 @@ impl FanController {
         curves: Vec<FanCurve>,
         wireless: Option<Arc<WirelessController>>,
         wired_devices: Arc<HashMap<String, Box<dyn FanDevice>>>,
+        daemon_tx: Option<Sender<DaemonEvent>>,
     ) -> Self {
         let curves_map: HashMap<String, FanCurve> =
             curves.into_iter().map(|c| (c.name.clone(), c)).collect();
@@ -36,6 +40,7 @@ impl FanController {
             wired_devices,
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread: None,
+            daemon_tx,
         }
     }
 
@@ -45,10 +50,19 @@ impl FanController {
         let wireless = self.wireless.clone();
         let wired = Arc::clone(&self.wired_devices);
         let stop_flag = Arc::clone(&self.stop_flag);
+        let daemon_tx = self.daemon_tx.clone();
         let all_sensors = lianli_shared::sensors::enumerate_sensors();
 
         let thread = thread::spawn(move || {
-            fan_control_thread(config, curves, wireless, wired, stop_flag, &all_sensors);
+            fan_control_thread(
+                config,
+                curves,
+                wireless,
+                wired,
+                stop_flag,
+                daemon_tx,
+                &all_sensors,
+            );
         });
 
         self.thread = Some(thread);
@@ -68,6 +82,7 @@ fn fan_control_thread(
     wireless: Option<Arc<WirelessController>>,
     wired: Arc<HashMap<String, Box<dyn FanDevice>>>,
     stop_flag: Arc<AtomicBool>,
+    daemon_tx: Option<Sender<DaemonEvent>>,
     all_sensors: &[SensorInfo],
 ) {
     let update_interval = Duration::from_millis(config.update_interval_ms);
@@ -159,6 +174,11 @@ fn fan_control_thread(
             if let Some(ref w) = wireless {
                 if let Err(err) = w.send_master_clock() {
                     debug!("master clock send failed: {err}");
+                }
+                if w.rgb_drifted() {
+                    if let Some(ref tx) = daemon_tx {
+                        tx.send(DaemonEvent::ResyncWirelessRgb).ok();
+                    }
                 }
             }
             last_heartbeat = now;

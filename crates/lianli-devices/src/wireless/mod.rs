@@ -29,16 +29,11 @@ const RF_PWM_CMD: u8 = 0x10;
 const RF_AIO_SWITCH_WIRELESS: u8 = 0x19;
 const RF_SET_RGB: u8 = 0x20;
 const RF_AIO_PARAMS: u8 = 0x21;
-const RF_AIO_PIC: u8 = 0x22;
 
 const RF_DATA_SIZE: usize = 240;
 const RF_CHUNK_SIZE: usize = 60;
 const RF_CHUNKS: usize = RF_DATA_SIZE / RF_CHUNK_SIZE;
 
-/// Maximum size of a JPEG uploaded to an AIO's built-in display.
-pub const AIO_PIC_MAX_BYTES: usize = 20_480;
-/// Width/height of an AIO's built-in display in pixels.
-pub const AIO_PIC_DIMENSION: u32 = 480;
 /// Size of the aio_param state block sent over RF to wireless AIOs.
 pub const AIO_PARAM_LEN: usize = 32;
 

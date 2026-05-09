@@ -7,11 +7,13 @@ use super::{
 use anyhow::{bail, Context, Result};
 use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+const TX_FAILURE_THRESHOLD: u32 = 5;
 
 pub struct WirelessController {
     pub(super) tx: Option<Arc<Mutex<UsbTransport>>>,
@@ -25,6 +27,8 @@ pub struct WirelessController {
     /// Motherboard PWM duty cycle (0-255) extracted from RX GetDev response bytes [2:3].
     /// 0xFFFF means unavailable/not yet read.
     pub(super) mobo_pwm: Arc<AtomicU16>,
+    pub(super) tx_failures: Arc<AtomicU32>,
+    pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], [u8; 4]>>>,
 }
 
 impl Clone for WirelessController {
@@ -39,6 +43,8 @@ impl Clone for WirelessController {
             master_channel: Arc::clone(&self.master_channel),
             discovered_devices: Arc::clone(&self.discovered_devices),
             mobo_pwm: Arc::clone(&self.mobo_pwm),
+            tx_failures: Arc::clone(&self.tx_failures),
+            desired_effects: Arc::clone(&self.desired_effects),
         }
     }
 }
@@ -55,6 +61,8 @@ impl WirelessController {
             master_channel: Arc::new(Mutex::new(8)),
             discovered_devices: Arc::new(Mutex::new(Vec::new())),
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
+            tx_failures: Arc::new(AtomicU32::new(0)),
+            desired_effects: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -96,6 +104,7 @@ impl WirelessController {
 
         self.tx = Some(tx_arc);
         self.rx = rx_arc;
+        self.tx_failures.store(0, Ordering::Relaxed);
 
         self.discover_master_mac()?;
         Ok(())
@@ -266,10 +275,10 @@ impl WirelessController {
             return Ok(());
         }
 
-        if let Some(tx) = &self.tx {
+        if self.tx.is_some() {
             let device_count = self.discovered_devices.lock().len().max(1);
             let master_ch = *self.master_channel.lock();
-            with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+            self.tx_recover(|handle| {
                 handle
                     .write(&CMD_VIDEO_START, USB_TIMEOUT)
                     .context("sending TX video start")?;
@@ -299,7 +308,6 @@ impl WirelessController {
     /// occasionally spikes RPM. We send all-zero info bytes — the firmware
     /// only seems to need the heartbeat itself.
     pub fn send_master_clock(&self) -> Result<()> {
-        let tx = self.tx.as_ref().context("TX device not connected")?;
         let master_mac = *self.master_mac.lock();
         let master_ch = *self.master_channel.lock();
 
@@ -309,7 +317,7 @@ impl WirelessController {
         rf_data[8..14].copy_from_slice(&master_mac);
         // rf_data[14..234] = cpuInfoParam (220 bytes, leave zero)
 
-        with_transport_recovery(tx, &TX_IDS, "TX", |handle| {
+        self.tx_recover(|handle| {
             for chunk_idx in 0..RF_CHUNKS as u8 {
                 let mut packet = vec![0u8; 64];
                 packet[0] = USB_CMD_SEND_RF;
@@ -379,6 +387,43 @@ impl WirelessController {
         }
 
         false
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.tx.is_some() && self.tx_failures.load(Ordering::Relaxed) < TX_FAILURE_THRESHOLD
+    }
+
+    /// Returns true if any wireless device's currently-running effect_index
+    /// drifted away from what we last sent. Indicates the device firmware
+    /// reset its lighting state (e.g. idle watchdog) and we should re-apply.
+    pub fn rgb_drifted(&self) -> bool {
+        let desired = self.desired_effects.lock();
+        if desired.is_empty() {
+            return false;
+        }
+        let devices = self.discovered_devices.lock();
+        devices.iter().any(|d| match desired.get(&d.mac) {
+            Some(want) => d.effect_index != *want,
+            None => false,
+        })
+    }
+
+    pub(super) fn tx_recover<F, R>(&self, op: F) -> Result<R>
+    where
+        F: FnMut(&UsbTransport) -> Result<R>,
+    {
+        let tx = self.tx.as_ref().context("TX device not connected")?;
+        let result = with_transport_recovery(tx, &TX_IDS, "TX", op);
+        match &result {
+            Ok(_) => self.tx_failures.store(0, Ordering::Relaxed),
+            Err(_) => {
+                let n = self.tx_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == TX_FAILURE_THRESHOLD {
+                    warn!("Wireless TX: {n} consecutive failures, marking disconnected");
+                }
+            }
+        }
+        result
     }
 
     pub fn has_discovered_devices(&self) -> bool {
