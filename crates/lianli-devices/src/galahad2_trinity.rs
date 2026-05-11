@@ -135,7 +135,8 @@ impl Galahad2TrinityController {
         let mut pkt = [0u8; PACKET_SIZE];
         pkt[0] = REPORT_ID;
         pkt[1] = CMD_HANDSHAKE;
-        dev.write(&pkt).context("Galahad2 Trinity: write handshake")?;
+        dev.write(&pkt)
+            .context("Galahad2 Trinity: write handshake")?;
 
         let mut buf = [0u8; PACKET_SIZE];
         let n = dev
@@ -334,37 +335,6 @@ impl Galahad2TrinityController {
         cached.map(|(hs, _)| hs)
     }
 
-    /// Write a command and read back a response. Only for commands that actually respond (0x81, 0x86).
-    fn send_a_command_timeout(&self, cmd: u8, data: &[u8], timeout_ms: i32) -> Result<Vec<u8>> {
-        if data.len() > PACKET_SIZE - HEADER_LEN {
-            bail!(
-                "Galahad2 Trinity: payload too large for command {cmd:#04x} ({} > {})",
-                data.len(),
-                PACKET_SIZE - HEADER_LEN
-            );
-        }
-        let mut pkt = [0u8; PACKET_SIZE];
-        pkt[0] = REPORT_ID;
-        pkt[1] = cmd;
-        let copy_len = data.len();
-        pkt[5] = copy_len as u8;
-        pkt[HEADER_LEN..HEADER_LEN + copy_len].copy_from_slice(data);
-
-        let mut dev = self.device.lock();
-        dev.write(&pkt).context("Galahad2 Trinity: write")?;
-
-        let mut buf = [0u8; PACKET_SIZE];
-        let n = dev
-            .read_timeout(&mut buf, timeout_ms)
-            .context("Galahad2 Trinity: read")?;
-
-        if n == 0 {
-            bail!("Galahad2 Trinity: no response to command {cmd:#04x}");
-        }
-
-        Ok(buf[..n].to_vec())
-    }
-
     /// Write a fire-and-forget command (no response expected: 0x8a, 0x8b, 0x83, 0x85).
     fn send_write_command(&self, cmd: u8, data: &[u8]) -> Result<()> {
         if data.len() > PACKET_SIZE - HEADER_LEN {
@@ -380,7 +350,10 @@ impl Galahad2TrinityController {
         let copy_len = data.len();
         pkt[5] = copy_len as u8;
         pkt[HEADER_LEN..HEADER_LEN + copy_len].copy_from_slice(data);
-        self.device.lock().write(&pkt).context("Galahad2 Trinity: write command")?;
+        self.device
+            .lock()
+            .write(&pkt)
+            .context("Galahad2 Trinity: write command")?;
         Ok(())
     }
 }
