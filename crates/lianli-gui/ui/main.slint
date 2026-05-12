@@ -62,7 +62,9 @@ export component MainWindow inherits Window {
     in property <[string]> fan-speed-options: [];
     in property <[string]> fan-sensor-options: [];
     in property <[string]> fan-pwm-header-options: [];
-    in property <int> fan-update-interval: 500;
+    in property <int> fan-update-interval: 1000;
+    in property <float> fan-hysteresis-temp: 1.0;
+    in property <int> fan-hysteresis-pwm: 5;
 
     // Callbacks for Rust backend
     callback refresh-devices();
@@ -139,6 +141,8 @@ export component MainWindow inherits Window {
     callback fan-set-slot-pwm(string, int, int);
     callback fan-set-pwm-header(string, int, string);
     callback fan-set-update-interval(int);
+    callback fan-set-hysteresis-temp(float);
+    callback fan-set-hysteresis-pwm(int);
 
     HorizontalLayout {
         Sidebar {
@@ -194,6 +198,8 @@ export component MainWindow inherits Window {
                 sensor-options: root.fan-sensor-options;
                 pwm-header-options: root.fan-pwm-header-options;
                 update-interval: root.fan-update-interval;
+                hysteresis-temp: root.fan-hysteresis-temp;
+                hysteresis-pwm: root.fan-hysteresis-pwm;
                 has-config: root.has-config;
                 add-curve => { root.fan-add-curve(); }
                 remove-curve(idx) => { root.fan-remove-curve(idx); }
@@ -207,6 +213,8 @@ export component MainWindow inherits Window {
                 set-slot-pwm(dev-id, slot, pct) => { root.fan-set-slot-pwm(dev-id, slot, pct); }
                 set-pwm-header(dev-id, slot, val) => { root.fan-set-pwm-header(dev-id, slot, val); }
                 set-update-interval(ms) => { root.fan-set-update-interval(ms); }
+                set-hysteresis-temp(v) => { root.fan-set-hysteresis-temp(v); }
+                set-hysteresis-pwm(v) => { root.fan-set-hysteresis-pwm(v); }
                 save-config => { root.save-config(); }
             }
 
