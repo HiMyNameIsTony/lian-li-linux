@@ -146,6 +146,8 @@ sudo dnf install hidapi-devel libusb1-devel fontconfig-devel \
   ffmpeg-devel nasm
 # evdi is not packaged in Fedora repos — build libevdi from source to link the daemon:
 #   https://github.com/DisplayLink/evdi  (evdi-dkms is only needed at runtime)
+# You can also download https://github.com/displaylink-rpm/displaylink-rpm
+# Make sure to install replace ffmpeg-free with ffmpeg if ffmpeg-free is installed
 ```
 
 3) Build:
