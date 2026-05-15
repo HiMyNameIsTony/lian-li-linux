@@ -9,6 +9,7 @@ pub struct ScreenInfo {
     pub jpeg_quality: u8,
     pub max_payload: usize,
     pub h264: bool,
+    pub needs_keepalive: bool,
 }
 
 impl ScreenInfo {
@@ -20,6 +21,7 @@ impl ScreenInfo {
         jpeg_quality: 90,
         max_payload: 102_400 - 512,
         h264: false,
+        needs_keepalive: false,
     };
 
     pub const TLLCD: Self = Self {
@@ -29,6 +31,7 @@ impl ScreenInfo {
         jpeg_quality: 90,
         max_payload: 65_535,
         h264: false,
+        needs_keepalive: true,
     };
 
     pub const AIO_LCD_480: Self = Self {
@@ -38,6 +41,7 @@ impl ScreenInfo {
         jpeg_quality: 85,
         max_payload: 153_600,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const HYDROSHIFT2: Self = Self {
@@ -47,6 +51,7 @@ impl ScreenInfo {
         jpeg_quality: 85,
         max_payload: 153_600,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const LANCOOL_207: Self = Self {
@@ -56,6 +61,7 @@ impl ScreenInfo {
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: false,
+        needs_keepalive: false,
     };
 
     pub const LANCOOL_207_H264: Self = Self {
@@ -65,6 +71,7 @@ impl ScreenInfo {
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const UNIVERSAL_SCREEN: Self = Self {
@@ -74,6 +81,7 @@ impl ScreenInfo {
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: true,
+        needs_keepalive: false,
     };
 }
 

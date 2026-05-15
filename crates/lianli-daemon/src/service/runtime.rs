@@ -502,6 +502,7 @@ impl AsyncSensorRenderer {
         tx: Option<Sender<DaemonEvent>>,
         asset: Arc<SensorAsset>,
         baseasset: Arc<MediaAsset>,
+        keep_alive_on_no_change: bool,
     ) -> Self {
         let initial = match asset.render_frame(true) {
             Ok(Some(frame)) => frame,
@@ -529,7 +530,7 @@ impl AsyncSensorRenderer {
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                match asset_clone.render_frame(false) {
+                match asset_clone.render_frame(keep_alive_on_no_change) {
                     Ok(Some(new_frame)) => {
                         *frame_clone.lock() = new_frame;
                     }
@@ -656,6 +657,7 @@ impl AsyncCustomRenderer {
         tx: Option<Sender<DaemonEvent>>,
         asset: Arc<CustomAsset>,
         baseasset: Arc<MediaAsset>,
+        keep_alive_on_no_change: bool,
     ) -> Self {
         let initial = match asset.render_frame(true) {
             Ok(Some(frame)) => frame,
@@ -691,7 +693,7 @@ impl AsyncCustomRenderer {
                 if next_deadline < Instant::now() {
                     next_deadline = Instant::now() + update_interval;
                 }
-                match asset_clone.render_frame(false) {
+                match asset_clone.render_frame(keep_alive_on_no_change) {
                     Ok(Some(new_frame)) => {
                         *frame_clone.lock() = new_frame;
                         if let Some(ref tx) = tx_for_thread {
@@ -948,6 +950,7 @@ impl MediaRuntime {
                     tx,
                     Arc::clone(sensor_asset),
                     Arc::clone(&asset),
+                    screen.needs_keepalive,
                 ));
                 let cached_frame = renderer.get_current_frame();
                 Self::Sensor {
@@ -998,6 +1001,7 @@ impl MediaRuntime {
                     tx,
                     Arc::clone(custom_asset),
                     Arc::clone(&asset),
+                    screen.needs_keepalive,
                 ));
 
                 let cached_frame = renderer.get_current_frame();
