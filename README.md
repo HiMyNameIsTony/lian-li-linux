@@ -200,24 +200,11 @@ update-desktop-database ~/.local/share/applications/
 
 ### With Docker
 
-1) Build the Docker image:
 ```bash
-docker build -f docker/build.Dockerfile -t lianli-linux-builder \
-  --build-arg USER_ID="$(id -u)" \
-  --build-arg GROUP_ID="$(id -g)" \
-  .
-```
-2) Build the project:
-```bash
-docker run --rm -it \
-  -v "$PWD:/work" \
-  -v "$PWD/target:/work/target" \
-  -v "$PWD/.cache/cargo-registry:/home/builder/.cargo/registry" \
-  -v "$PWD/.cache/cargo-git:/home/builder/.cargo/git" \
-  lianli-linux-builder
+./docker/build.sh
 ```
 
-Then follow steps 4-6 from "From Source" above.
+The script builds the image (matching your UID/GID), mounts a cargo cache, and runs `cargo build --release`. Artifacts land in `target/release/` on the host. Then follow steps 4-6 from "From Source" above.
 
 ## Configuration
 
