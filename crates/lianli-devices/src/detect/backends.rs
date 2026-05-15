@@ -12,28 +12,43 @@ use tracing::warn;
 
 /// Build a reopener that re-acquires the same HID device via hidapi by VID/PID.
 /// Used to recover from stale handles after USB suspend/resume.
-fn make_hidapi_reopener(vid: u16, pid: u16, family: DeviceFamily) -> HidReopener {
+fn make_hidapi_reopener(path: std::ffi::CString) -> HidReopener {
     Arc::new(move || {
         let api = HidApi::new().map_err(|e| anyhow::anyhow!("hidapi init: {e}"))?;
-        let det = find_hid_devices_by_family(&api, family)
-            .into_iter()
-            .find(|d| d.vid == vid && d.pid == pid)
-            .ok_or_else(|| {
-                anyhow::anyhow!("HID device {vid:04x}:{pid:04x} not enumerable on reopen")
-            })?;
         let dev = api
-            .open_path(&det.path)
-            .map_err(|e| anyhow::anyhow!("hidapi open_path: {e}"))?;
+            .open_path(&path)
+            .map_err(|e| anyhow::anyhow!("hidapi open_path {:?}: {e}", path))?;
         Ok(HidBackendKind::Hidapi(dev))
     })
 }
 
 /// Build a reopener that re-acquires the same HID device via the rusb backend.
-fn make_rusb_reopener(vid: u16, pid: u16, usage_page: Option<u16>) -> HidReopener {
+/// Matches by USB topology (bus + port_numbers) to disambiguate multiple devices
+/// sharing the same VID:PID (e.g. daisy-chained TL LCD fans).
+fn make_rusb_reopener(
+    vid: u16,
+    pid: u16,
+    bus: u8,
+    port_numbers: Vec<u8>,
+    usage_page: Option<u16>,
+) -> HidReopener {
     Arc::new(move || {
-        let usb_dev = find_usb_device(vid, pid).ok_or_else(|| {
-            anyhow::anyhow!("USB device {vid:04x}:{pid:04x} not enumerable on reopen")
-        })?;
+        let usb_dev = rusb::devices()
+            .map_err(|e| anyhow::anyhow!("rusb devices: {e}"))?
+            .iter()
+            .find(|d| {
+                d.bus_number() == bus
+                    && d.port_numbers().ok().as_deref() == Some(&port_numbers[..])
+                    && d.device_descriptor()
+                        .map(|desc| desc.vendor_id() == vid && desc.product_id() == pid)
+                        .unwrap_or(false)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "USB device {vid:04x}:{pid:04x} at {bus}-{:?} not enumerable on reopen",
+                    port_numbers
+                )
+            })?;
         let transport = RusbHidTransport::open_by_usage(usb_dev, usage_page)
             .map_err(|e| anyhow::anyhow!("rusb hid open: {e}"))?;
         Ok(HidBackendKind::Rusb(transport))
@@ -116,6 +131,72 @@ pub fn open_hid_lcd_device(
     }
 }
 
+fn usb_topology_string(bus: u8, port_numbers: &[u8]) -> String {
+    format!(
+        "{}-{}",
+        bus,
+        port_numbers
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
+    )
+}
+
+pub fn hidraw_path_for_usb_topology(bus: u8, port_numbers: &[u8]) -> Option<std::ffi::CString> {
+    if port_numbers.is_empty() {
+        return None;
+    }
+    let topology = usb_topology_string(bus, port_numbers);
+    let needles = [format!("/{topology}/"), format!("/{topology}:")];
+    let class_dir = std::path::Path::new("/sys/class/hidraw");
+    for entry in std::fs::read_dir(class_dir).ok()?.flatten() {
+        let Ok(resolved) = std::fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        let resolved_str = resolved.to_string_lossy();
+        if needles.iter().any(|n| resolved_str.contains(n.as_str())) {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            return std::ffi::CString::new(format!("/dev/{name}")).ok();
+        }
+    }
+    None
+}
+
+/// Open a HID LCD device by USB topology (bus + port path).
+/// Picks the specific hidraw belonging to that USB device, then opens it via hidapi.
+/// Required for devices like TL LCD where multiple physical units share VID:PID.
+pub fn open_hid_lcd_by_topology(
+    vid: u16,
+    pid: u16,
+    family: DeviceFamily,
+    bus: u8,
+    port_numbers: &[u8],
+) -> Result<Box<dyn crate::traits::LcdDevice>> {
+    let target_path = hidraw_path_for_usb_topology(bus, port_numbers).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no hidraw matching USB topology {} for {vid:04x}:{pid:04x}",
+            usb_topology_string(bus, port_numbers)
+        )
+    })?;
+    let api = HidApi::new().map_err(|e| anyhow::anyhow!("hidapi init: {e}"))?;
+    let det = find_hid_devices_by_family(&api, family)
+        .into_iter()
+        .find(|d| d.path == target_path)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no enumerated HID device matching path {:?} for {vid:04x}:{pid:04x}",
+                target_path
+            )
+        })?;
+    match open_hid_lcd_device(&api, &det) {
+        Some(Ok(ctrl)) => Ok(ctrl),
+        Some(Err(e)) => Err(e.context("HID LCD open by topology")),
+        None => Err(anyhow::anyhow!("family does not support LCD")),
+    }
+}
+
 /// Open a HID LCD device by VID/PID using hidapi with retry logic.
 ///
 /// Unlike `open_hid_lcd_device` (which requires a pre-enumerated `DetectedHidDevice`),
@@ -180,30 +261,44 @@ pub fn open_hid_lcd_device_rusb(
     match det.family {
         DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => {
             let pid = det.pid;
+            let bus = det.bus;
+            let port_numbers = det.device.port_numbers().unwrap_or_default();
             Some(open_with_retry(&det.device, || {
                 let transport =
                     RusbHidTransport::open_by_usage(det.device.clone(), det.hid_usage_page)?;
-                let mut backend = HidBackend::from_rusb(transport)
-                    .with_reopener(make_rusb_reopener(det.vid, det.pid, det.hid_usage_page));
+                let mut backend =
+                    HidBackend::from_rusb(transport).with_reopener(make_rusb_reopener(
+                        det.vid,
+                        det.pid,
+                        bus,
+                        port_numbers.clone(),
+                        det.hid_usage_page,
+                    ));
                 backend.read_flush();
                 let backend = Arc::new(Mutex::new(backend));
                 crate::hydroshift_lcd::HydroShiftLcdController::new(backend, pid)
                     .map(|d| Box::new(d) as Box<dyn crate::traits::LcdDevice>)
             }))
         }
-        DeviceFamily::TlLcd => Some(open_with_retry(&det.device, || {
-            let transport =
-                RusbHidTransport::open_by_usage(det.device.clone(), det.hid_usage_page)?;
-            let backend = HidBackend::from_rusb(transport).with_reopener(make_rusb_reopener(
-                det.vid,
-                det.pid,
-                det.hid_usage_page,
-            ));
-            let backend = Arc::new(Mutex::new(backend));
-            let mut tl = crate::tl_lcd::TlLcdDevice::new(backend);
-            crate::traits::LcdDevice::initialize(&mut tl)?;
-            Ok(Box::new(tl) as Box<dyn crate::traits::LcdDevice>)
-        })),
+        DeviceFamily::TlLcd => {
+            let bus = det.bus;
+            let port_numbers = det.device.port_numbers().unwrap_or_default();
+            Some(open_with_retry(&det.device, || {
+                let transport =
+                    RusbHidTransport::open_by_usage(det.device.clone(), det.hid_usage_page)?;
+                let backend = HidBackend::from_rusb(transport).with_reopener(make_rusb_reopener(
+                    det.vid,
+                    det.pid,
+                    bus,
+                    port_numbers.clone(),
+                    det.hid_usage_page,
+                ));
+                let backend = Arc::new(Mutex::new(backend));
+                let mut tl = crate::tl_lcd::TlLcdDevice::new(backend);
+                crate::traits::LcdDevice::initialize(&mut tl)?;
+                Ok(Box::new(tl) as Box<dyn crate::traits::LcdDevice>)
+            }))
+        }
         _ => None,
     }
 }
@@ -221,8 +316,8 @@ pub fn open_hidapi_with_retry<T>(
         let hid_dev = api
             .open_path(&det.path)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut backend = HidBackend::from_hidapi(hid_dev)
-            .with_reopener(make_hidapi_reopener(det.vid, det.pid, det.family));
+        let mut backend =
+            HidBackend::from_hidapi(hid_dev).with_reopener(make_hidapi_reopener(det.path.clone()));
         backend.read_flush();
         Ok(backend)
     })?;
@@ -243,11 +338,18 @@ pub fn open_hid_backend_hidapi(
 pub fn open_hid_backend_rusb(det: &DetectedDevice) -> Result<Arc<Mutex<HidBackend>>> {
     let vid = det.vid;
     let pid = det.pid;
+    let bus = det.bus;
+    let port_numbers = det.device.port_numbers().unwrap_or_default();
     let usage_page = det.hid_usage_page;
     open_with_retry(&det.device, || {
         let transport = RusbHidTransport::open_by_usage(det.device.clone(), det.hid_usage_page)?;
-        let backend = HidBackend::from_rusb(transport)
-            .with_reopener(make_rusb_reopener(vid, pid, usage_page));
+        let backend = HidBackend::from_rusb(transport).with_reopener(make_rusb_reopener(
+            vid,
+            pid,
+            bus,
+            port_numbers.clone(),
+            usage_page,
+        ));
         Ok(Arc::new(Mutex::new(backend)))
     })
 }

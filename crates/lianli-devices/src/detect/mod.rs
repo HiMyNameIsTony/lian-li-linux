@@ -6,12 +6,12 @@ mod controllers;
 mod enumerate;
 
 pub use backends::{
-    open_hid_backend_hidapi, open_hid_backend_rusb, open_hid_lcd_by_vid_pid,
-    open_hid_lcd_device_rusb,
+    hidraw_path_for_usb_topology, open_hid_backend_hidapi, open_hid_backend_rusb,
+    open_hid_lcd_by_topology, open_hid_lcd_by_vid_pid, open_hid_lcd_device_rusb,
 };
 pub use binding::ensure_hid_devices_bound;
 pub use controllers::{create_hid_lcd_device, create_wired_controllers, WiredControllerSet};
-pub use enumerate::{enumerate_devices, enumerate_hid_devices};
+pub use enumerate::{enumerate_devices, enumerate_hid_devices, probe_tl_lcd_port_indices_rusb};
 
 use lianli_shared::device_id::DeviceFamily;
 use rusb::{Device, GlobalContext};
@@ -67,6 +67,8 @@ pub struct DetectedHidDevice {
     pub serial: Option<String>,
     /// USB port path (e.g. "1-5.3") for stable device IDs.
     pub usb_port_path: Option<String>,
+    /// (port, fan_index) for daisy-chained TL LCD fans, read during enumeration.
+    pub port_index: Option<(u8, u8)>,
 }
 
 /// Known non-unique HID serial strings (chip manufacturer names, firmware

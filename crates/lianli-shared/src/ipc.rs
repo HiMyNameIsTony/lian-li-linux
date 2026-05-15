@@ -204,6 +204,9 @@ pub struct DeviceInfo {
     pub firmware_version: Option<String>,
     #[serde(default)]
     pub supports_c_command: bool,
+    /// (port, fan_index) for daisy-chained TL LCD fans. None for other devices.
+    #[serde(default)]
+    pub port_index: Option<(u8, u8)>,
 }
 
 /// Status of the OpenRGB SDK server.

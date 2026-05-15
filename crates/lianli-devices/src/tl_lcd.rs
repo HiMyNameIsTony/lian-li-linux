@@ -11,9 +11,12 @@ use crate::traits::LcdDevice;
 use anyhow::{bail, Context, Result};
 use lianli_shared::screen::ScreenInfo;
 use lianli_transport::HidBackend;
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+static CHAIN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 const REPORT_ID: u8 = 0x02;
 const PACKET_SIZE: usize = 512;
@@ -122,7 +125,7 @@ impl TlLcdDevice {
         Ok(ident)
     }
 
-    fn read_identity_raw(&self) -> Result<TlLcdIdentity> {
+    pub fn read_identity_raw(&self) -> Result<TlLcdIdentity> {
         let resp =
             self.send_command_with_response_timeout(CMD_READ_SERIAL, &[], INIT_READ_TIMEOUT_MS)?;
         let data = &resp[HEADER_LEN..];
@@ -166,6 +169,7 @@ impl TlLcdDevice {
 
     /// Read firmware version string.
     pub fn read_firmware(&self) -> Result<String> {
+        let _chain = CHAIN_LOCK.lock();
         let mut dev = self.device.lock();
         dev.read_flush();
 
@@ -234,7 +238,13 @@ impl TlLcdDevice {
         payload[4] = self.brightness;
         payload[5] = 30;
         payload[6] = self.rotation as u8;
-        self.send_command_with_response(CMD_LCD_CONTROL, &payload)?;
+
+        let _chain = CHAIN_LOCK.lock();
+        let mut dev = self.device.lock();
+        let pkt = build_packet(CMD_LCD_CONTROL, payload.len() as u32, 0, &payload);
+        dev.write(&pkt).context("TLLCD: write LCDControl ShowJpg")?;
+        let mut buf = [0u8; 64];
+        let _ = dev.read_timeout(&mut buf, READ_TIMEOUT_MS);
         Ok(())
     }
 
@@ -252,8 +262,10 @@ impl TlLcdDevice {
         let total_size = data.len();
         let mut offset = 0;
         let mut packet_num: u32 = 0;
+        let _chain = CHAIN_LOCK.lock();
         let mut dev = self.device.lock();
 
+        let mut ack_buf = [0u8; 64];
         while offset < total_size {
             let remaining = total_size - offset;
             let chunk_len = remaining.min(MAX_PAYLOAD_PER_PACKET);
@@ -265,6 +277,10 @@ impl TlLcdDevice {
                 &data[offset..offset + chunk_len],
             );
             dev.write(&pkt).context("TLLCD: write packet")?;
+            if read_response {
+                dev.read_timeout(&mut ack_buf, READ_TIMEOUT_MS)
+                    .context("TLLCD: read packet ack")?;
+            }
 
             offset += chunk_len;
             packet_num += 1;
@@ -273,12 +289,10 @@ impl TlLcdDevice {
         if total_size == 0 {
             let pkt = build_packet(cmd, 0, 0, &[]);
             dev.write(&pkt).context("TLLCD: write empty packet")?;
-        }
-
-        if read_response {
-            let mut buf = [0u8; 64];
-            dev.read_timeout(&mut buf, READ_TIMEOUT_MS)
-                .context("TLLCD: read response")?;
+            if read_response {
+                dev.read_timeout(&mut ack_buf, READ_TIMEOUT_MS)
+                    .context("TLLCD: read empty packet ack")?;
+            }
         }
 
         Ok(())
@@ -286,6 +300,7 @@ impl TlLcdDevice {
 
     /// Send a command with payload and don't wait for any response.
     fn send_command_no_response(&self, cmd: u8, payload: &[u8]) -> Result<()> {
+        let _chain = CHAIN_LOCK.lock();
         let mut dev = self.device.lock();
         let pkt = build_packet(cmd, payload.len() as u32, 0, payload);
         dev.write(&pkt).context("TLLCD: write command (no resp)")?;
@@ -303,6 +318,7 @@ impl TlLcdDevice {
         payload: &[u8],
         timeout_ms: i32,
     ) -> Result<Vec<u8>> {
+        let _chain = CHAIN_LOCK.lock();
         let mut dev = self.device.lock();
         let pkt = build_packet(cmd, payload.len() as u32, 0, payload);
 

@@ -93,6 +93,8 @@ pub struct ServiceManager {
     /// Firmware string + C-command capability per AIO LCD device_id, populated
     /// when the controller attaches and surfaced through DeviceInfo.
     aio_lcd_info: HashMap<String, (Option<String>, bool)>,
+    /// TL LCD (port, fan_index) per device_id. Probed once at init, sync.rs reads this.
+    tl_lcd_port_index: HashMap<String, (u8, u8)>,
     last_wireless_count: usize,
     last_poll_mono: Instant,
     last_poll_wall: std::time::SystemTime,
@@ -130,6 +132,7 @@ impl ServiceManager {
             last_wired_hid_ids: std::collections::HashSet::new(),
             cached_usb_devices: Vec::new(),
             aio_lcd_info: HashMap::new(),
+            tl_lcd_port_index: HashMap::new(),
             last_wireless_count: 0,
             last_poll_mono: Instant::now(),
             last_poll_wall: std::time::SystemTime::now(),

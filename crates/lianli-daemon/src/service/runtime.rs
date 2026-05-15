@@ -532,18 +532,21 @@ impl AsyncSensorRenderer {
                 match asset_clone.render_frame(false) {
                     Ok(Some(new_frame)) => {
                         *frame_clone.lock() = new_frame;
-                        if let Some(ref tx) = tx_for_thread {
-                            let event = DaemonEvent::FrameFinished {
-                                asset: Arc::clone(&asset_for_thread),
-                            };
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        frame_clone.lock().frame_index += 1;
+                    }
                     Err(err) => {
                         warn!("sensor background render failed: {err}");
+                        continue;
+                    }
+                }
+                if let Some(ref tx) = tx_for_thread {
+                    let event = DaemonEvent::FrameFinished {
+                        asset: Arc::clone(&asset_for_thread),
+                    };
+                    if tx.send(event).is_err() {
+                        break;
                     }
                 }
             }
