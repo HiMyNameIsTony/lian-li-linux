@@ -552,27 +552,100 @@ pub(crate) fn wire_lcd_callbacks(
 }
 
 fn default_sensor() -> lianli_shared::media::SensorDescriptor {
+    use lianli_shared::media::{SensorRange, SensorSourceConfig};
     lianli_shared::media::SensorDescriptor {
         label: "CPU".to_string(),
         unit: "\u{00B0}C".to_string(),
-        source: lianli_shared::media::SensorSourceConfig::Command { cmd: String::new() },
+        source: detect_cpu_temp_source().unwrap_or(SensorSourceConfig::Hwmon {
+            name: String::new(),
+            label: String::new(),
+            device_path: String::new(),
+        }),
         text_color: [255, 255, 255],
         background_color: [0, 0, 0],
-        gauge_background_color: [40, 40, 40],
-        gauge_ranges: vec![],
+        gauge_background_color: [0, 0, 0],
+        gauge_ranges: vec![
+            SensorRange {
+                max: Some(50.0),
+                color: [0, 200, 0],
+                alpha: 255,
+            },
+            SensorRange {
+                max: Some(80.0),
+                color: [220, 140, 0],
+                alpha: 255,
+            },
+            SensorRange {
+                max: None,
+                color: [220, 0, 0],
+                alpha: 255,
+            },
+        ],
         update_interval_ms: 0, // legacy field, see SensorDescriptor docs
-        gauge_start_angle: 135.0,
-        gauge_sweep_angle: 270.0,
-        gauge_outer_radius: 200.0,
-        gauge_thickness: 30.0,
-        bar_corner_radius: 5.0,
-        value_font_size: 120.0,
+        gauge_start_angle: 60.0,
+        gauge_sweep_angle: 300.0,
+        gauge_outer_radius: 180.0,
+        gauge_thickness: 40.0,
+        bar_corner_radius: 20.0,
+        value_font_size: 180.0,
         unit_font_size: 40.0,
-        label_font_size: 30.0,
-        font_path: None,
+        label_font_size: 40.0,
+        font_path: detect_default_font(),
         decimal_places: 0,
-        value_offset: 0,
-        unit_offset: 0,
-        label_offset: 0,
+        value_offset: -90,
+        unit_offset: 80,
+        label_offset: -140,
     }
+}
+
+fn detect_cpu_temp_source() -> Option<lianli_shared::media::SensorSourceConfig> {
+    use lianli_shared::sensors::{enumerate_sensors, SensorSource, Unit};
+    let cpu_temps: Vec<_> = enumerate_sensors()
+        .into_iter()
+        .filter(|s| {
+            s.unit == Unit::C
+                && s.sensor_name
+                    .as_ref()
+                    .map(|n| n.get_device_name() == "CPU")
+                    .unwrap_or(false)
+                && matches!(s.source, SensorSource::Hwmon { .. })
+        })
+        .collect();
+    let picked = cpu_temps
+        .iter()
+        .find(|s| {
+            s.sensor_name
+                .as_ref()
+                .map(|n| n.get_sensor_name() == "Control Temp")
+                .unwrap_or(false)
+        })
+        .or_else(|| cpu_temps.first())?;
+    match &picked.source {
+        SensorSource::Hwmon {
+            name,
+            label,
+            device_path,
+        } => Some(lianli_shared::media::SensorSourceConfig::Hwmon {
+            name: name.clone(),
+            label: label.clone(),
+            device_path: device_path.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn detect_default_font() -> Option<std::path::PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ];
+    CANDIDATES
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
 }

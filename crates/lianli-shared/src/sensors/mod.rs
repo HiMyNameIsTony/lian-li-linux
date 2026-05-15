@@ -92,6 +92,16 @@ pub struct SensorName {
     sensor_name: String,
 }
 
+impl SensorName {
+    pub fn get_device_name(&self) -> &str {
+        &self.device_name
+    }
+
+    pub fn get_sensor_name(&self) -> &str {
+        &self.sensor_name
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Unit {
     C,

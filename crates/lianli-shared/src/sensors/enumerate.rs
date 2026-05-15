@@ -375,7 +375,10 @@ pub fn get_display_name(
         if name == "nvme" {
             return (Some("NVMe Storage Device".to_string()), mem_idx, gfx_idx);
         }
-        if name == "k10temp" || name == "coretemp" {
+        if matches!(
+            name,
+            "k10temp" | "k8temp" | "coretemp" | "zenpower" | "zenpower3"
+        ) {
             return (Some("CPU".to_string()), mem_idx, gfx_idx);
         }
         if name == "amdgpu" {
