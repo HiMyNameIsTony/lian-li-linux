@@ -20,7 +20,7 @@
 | UNI FAN SL / AL / SL Infinity / SL V2 / AL V2 | 4 groups | Yes | - | - | Yes |
 | UNI FAN TL Controller | 4 ports | Yes | - | - | Yes |
 | UNI FAN TL LCD | 4 ports | Yes | 400x400 | - | Yes |
-| Galahad II Trinity AIO | Yes | Yes | - | Yes | - |
+| Galahad II Trinity AIO | Yes | Yes | - | Yes | Yes |
 | HydroShift LCD AIO | Yes | Yes | 480x480 | Yes | Yes |
 | Galahad II LCD / Vision AIO | Yes | Yes | 480x480 | Yes | Yes |
 
@@ -34,8 +34,8 @@
 | UNI FAN SL V3 (LCD / LED) | Yes | Yes | 400x400 | - | Yes |
 | UNI FAN SL-INF | Yes | Yes | - | - | Yes |
 | UNI FAN CL / RL120 | Yes | Yes | - | - | - |
-| HydroShift II LCD-C (Wireless) | Yes | Yes | - | Yes | - |
-| HydroShift II LCD-S (Wireless) | Yes | Yes | - | Yes | - |
+| HydroShift II LCD-C (Wireless) | Yes | Yes | - | Yes | Yes |
+| HydroShift II LCD-S (Wireless) | Yes | Yes | - | Yes | Yes |
 | Strimer Plus Wireless | - | Yes | - | - | Yes |
 | Lancool 217 Wireless | - | Yes | - | - | - |
 | Lancool V150 Wireless | Yes | Yes | - | - | - |
