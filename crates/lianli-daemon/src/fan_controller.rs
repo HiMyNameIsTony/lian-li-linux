@@ -311,8 +311,7 @@ fn fan_control_thread(
                 }
             } else {
                 if let Some(ref w) = wireless {
-                    let mapped = map_stop(&speeds, 5);
-                    if let Err(err) = w.set_fan_speeds(group_idx as u8, &mapped) {
+                    if let Err(err) = w.set_fan_speeds(group_idx as u8, &speeds) {
                         warn!("Failed to set fan speeds for wireless device {group_idx}: {err}");
                     }
                 }
@@ -356,8 +355,7 @@ fn apply_wireless_by_id(
     // Find the device by MAC and get its list_index
     let devices = w.devices();
     if let Some(dev) = devices.iter().find(|d| d.mac_str() == mac_str) {
-        let mapped = map_stop(speeds, 5);
-        if let Err(err) = w.set_fan_speeds(dev.list_index, &mapped) {
+        if let Err(err) = w.set_fan_speeds(dev.list_index, speeds) {
             warn!("Failed to set fan speeds for {device_id}: {err}");
         }
     } else {
