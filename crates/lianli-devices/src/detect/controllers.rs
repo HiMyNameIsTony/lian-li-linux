@@ -71,7 +71,8 @@ pub fn create_wired_controllers(
         ),
         DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => Some(
             crate::hydroshift_lcd::HydroShiftLcdController::new(Arc::clone(&backend), pid)
-                .and_then(|lcd_ctrl| {
+                .and_then(|mut lcd_ctrl| {
+                    crate::traits::LcdDevice::initialize(&mut lcd_ctrl)?;
                     let rgb_ctrl = crate::hydroshift_lcd::AioLcdRgbController::new(backend, pid)?;
                     Ok(WiredControllerSet {
                         fan: Some(Box::new(Arc::new(lcd_ctrl))),

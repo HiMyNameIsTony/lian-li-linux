@@ -525,6 +525,10 @@ impl FanDevice for Arc<Ene6k77Controller> {
     fn set_port_fan_quantity(&self, port: u8, quantity: u8) -> Result<()> {
         (**self).set_port_fan_quantity(port, quantity)
     }
+
+    fn stop_pwm(&self) -> u8 {
+        1
+    }
 }
 
 fn expand_per_led(ui: &[[u8; 3]], num_fans: usize, leds_per_fan: usize) -> Vec<[u8; 3]> {

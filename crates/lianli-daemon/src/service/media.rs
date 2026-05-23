@@ -317,14 +317,30 @@ impl ServiceManager {
                         );
                         if let LcdBackend::HidLcd(ref hid) = lcd {
                             let mut guard = hid.lock();
+                            if let Err(e) = guard.initialize() {
+                                warn!(
+                                    "AIO LCD basic init failed for {}: {e:#}",
+                                    candidate.device_id
+                                );
+                            }
                             guard.set_use_c_command(device_cfg.aio_512_frame());
-                            self.aio_lcd_info.insert(
-                                candidate.device_id.clone(),
-                                (
-                                    guard.firmware_version_str().map(|s| s.to_string()),
-                                    guard.supports_c_command(),
-                                ),
-                            );
+                            self.aio_lcd_info
+                                .insert(candidate.device_id.clone(), (None, false));
+                            let skip = self
+                                .aio_lcd_skip_firmware
+                                .get(&candidate.device_id)
+                                .map(|t| t.elapsed() < std::time::Duration::from_secs(1800))
+                                .unwrap_or(false);
+                            if !skip {
+                                self.aio_lcd_pending_firmware.insert(
+                                    candidate.device_id.clone(),
+                                    (
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(10),
+                                        device_cfg.aio_512_frame(),
+                                    ),
+                                );
+                            }
                         }
                         let screen =
                             screen_info_for(candidate.family).unwrap_or(ScreenInfo::WIRELESS_LCD);

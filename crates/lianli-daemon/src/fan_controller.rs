@@ -132,35 +132,50 @@ fn fan_control_thread(
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
     let mut fan_states: HashMap<usize, FanState> = HashMap::new();
 
-    // Initialize MB sync state for all wired groups at startup.
-    for (group_idx, group) in config.speeds.iter().enumerate() {
+    let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
+    for group in config.speeds.iter() {
         let is_mb_sync = group.speeds.iter().any(|s| s.is_mb_sync());
         if let Some(ref device_id) = group.device_id {
             if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
-                if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
-                    if dev.supports_mb_sync() {
-                        if let Err(err) = dev.set_mb_rpm_sync(port, is_mb_sync) {
-                            warn!("Failed to set MB sync for {device_id}: {err}");
-                        } else if is_mb_sync {
-                            info!("MB RPM sync enabled for {device_id}");
-                        }
-                    }
+                if let Ok(port) = port_str.parse::<u8>() {
+                    mb_sync_init
+                        .entry(base_id.to_string())
+                        .or_default()
+                        .insert(port, is_mb_sync);
                 }
             } else if let Some(dev) = wired.get(device_id) {
-                if dev.supports_mb_sync() {
-                    if let Err(err) = dev.set_mb_rpm_sync(0, is_mb_sync) {
-                        warn!("Failed to set MB sync for {device_id}: {err}");
-                    } else if is_mb_sync {
-                        info!("MB RPM sync enabled for {device_id}");
-                    }
+                for (port, _) in dev.fan_port_info() {
+                    mb_sync_init
+                        .entry(device_id.clone())
+                        .or_default()
+                        .insert(port, is_mb_sync);
                 }
             }
         }
-        if is_mb_sync {
-            debug!(
-                "Group {group_idx} ({}): MB RPM sync mode",
-                group.device_id.as_deref().unwrap_or("none")
-            );
+    }
+    for (device_id, ports) in mb_sync_init {
+        if let Some((base_id, _)) = device_id.rsplit_once(":port") {
+            if let Some(dev) = wired.get(base_id) {
+                if dev.supports_mb_sync() {
+                    for (port, sync) in ports {
+                        if let Err(err) = dev.set_mb_rpm_sync(port, sync) {
+                            warn!("Failed to set MB sync for {device_id} port {port}: {err}");
+                        } else if sync {
+                            info!("MB RPM sync enabled for {device_id} port {port}");
+                        }
+                    }
+                }
+            }
+        } else if let Some(dev) = wired.get(&device_id) {
+            if dev.supports_mb_sync() {
+                for (port, sync) in ports {
+                    if let Err(err) = dev.set_mb_rpm_sync(port, sync) {
+                        warn!("Failed to set MB sync for {device_id} port {port}: {err}");
+                    } else if sync {
+                        info!("MB RPM sync enabled for {device_id} port {port}");
+                    }
+                }
+            }
         }
     }
 
@@ -271,20 +286,23 @@ fn fan_control_thread(
                 if device_id.starts_with("wireless:") {
                     apply_wireless_by_id(&wireless, device_id, &speeds, group_idx);
                 } else if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
-                    // Per-port wired device (e.g. "Nuvoton:port0")
                     if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
-                        if let Err(err) = dev.set_fan_speed(port, speeds[0]) {
+                        let stop = dev.stop_pwm();
+                        let mapped = map_stop(&speeds, stop);
+                        if let Err(err) = dev.set_fan_speed(port, mapped[0]) {
                             warn!("Failed to set fan speed for {device_id}: {err}");
                         }
                     } else {
                         warn!("Fan group {group_idx}: device '{device_id}' not found");
                     }
                 } else if let Some(dev) = wired.get(device_id) {
-                    if let Err(err) = dev.set_fan_speeds(&speeds) {
+                    let stop = dev.stop_pwm();
+                    let mapped = map_stop(&speeds, stop);
+                    if let Err(err) = dev.set_fan_speeds(&mapped) {
                         warn!("Failed to set fan speeds for {device_id}: {err}");
                     }
                     if dev.has_pump_control() {
-                        if let Err(err) = dev.set_pump_speed(speeds[3]) {
+                        if let Err(err) = dev.set_pump_speed(mapped[3]) {
                             warn!("Failed to set pump speed for {device_id}: {err}");
                         }
                     }
@@ -292,9 +310,9 @@ fn fan_control_thread(
                     warn!("Fan group {group_idx}: device '{device_id}' not found");
                 }
             } else {
-                // Legacy: match by group index to wireless devices
                 if let Some(ref w) = wireless {
-                    if let Err(err) = w.set_fan_speeds(group_idx as u8, &speeds) {
+                    let mapped = map_stop(&speeds, 5);
+                    if let Err(err) = w.set_fan_speeds(group_idx as u8, &mapped) {
                         warn!("Failed to set fan speeds for wireless device {group_idx}: {err}");
                     }
                 }
@@ -314,6 +332,15 @@ fn fan_control_thread(
     info!("Fan control thread stopped");
 }
 
+fn map_stop(speeds: &[u8; 4], stop: u8) -> [u8; 4] {
+    [
+        if speeds[0] == 0 { stop } else { speeds[0] },
+        if speeds[1] == 0 { stop } else { speeds[1] },
+        if speeds[2] == 0 { stop } else { speeds[2] },
+        if speeds[3] == 0 { stop } else { speeds[3] },
+    ]
+}
+
 fn apply_wireless_by_id(
     wireless: &Option<Arc<WirelessController>>,
     device_id: &str,
@@ -329,7 +356,8 @@ fn apply_wireless_by_id(
     // Find the device by MAC and get its list_index
     let devices = w.devices();
     if let Some(dev) = devices.iter().find(|d| d.mac_str() == mac_str) {
-        if let Err(err) = w.set_fan_speeds(dev.list_index, speeds) {
+        let mapped = map_stop(speeds, 5);
+        if let Err(err) = w.set_fan_speeds(dev.list_index, &mapped) {
             warn!("Failed to set fan speeds for {device_id}: {err}");
         }
     } else {
