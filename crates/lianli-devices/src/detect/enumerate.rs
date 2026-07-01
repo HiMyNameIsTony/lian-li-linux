@@ -2,9 +2,11 @@ use super::{DetectedDevice, DetectedHidDevice};
 use anyhow::Result;
 use hidapi::HidApi;
 use lianli_shared::device_id::{uses_hid, DeviceFamily, UsbId, KNOWN_DEVICES};
+use parking_lot::Mutex;
 use rusb::{Device, GlobalContext};
 use std::collections::HashSet;
-use tracing::debug;
+use std::sync::Arc;
+use tracing::{debug, warn};
 
 /// Look up the USB port path for a device by VID/PID. Returns e.g. "1-5.3"
 /// (bus-port topology), stable across reboots.
@@ -77,10 +79,6 @@ pub fn enumerate_devices() -> Result<Vec<DetectedDevice>> {
 }
 
 /// Enumerate all known Lian Li HID devices.
-///
-/// When a device entry specifies `hid_usage_page`, only the HID interface
-/// matching that usage page is returned. Otherwise, deduplicates by
-/// vid:pid:serial to avoid opening the wrong interface.
 pub fn enumerate_hid_devices(api: &HidApi) -> Vec<DetectedHidDevice> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
@@ -100,9 +98,8 @@ pub fn enumerate_hid_devices(api: &HidApi) -> Vec<DetectedHidDevice> {
                     continue;
                 }
             } else {
-                let serial_str = dev_info.serial_number().unwrap_or("").to_string();
-                let dedup_key = (vid, pid, serial_str);
-                if !seen.insert(dedup_key) {
+                let path = dev_info.path().to_owned();
+                if !seen.insert((vid, pid, path)) {
                     continue;
                 }
             }
@@ -127,11 +124,41 @@ pub fn enumerate_hid_devices(api: &HidApi) -> Vec<DetectedHidDevice> {
                 path: dev_info.path().to_owned(),
                 usb_port_path: usb_port_path(vid, pid),
                 serial,
+                port_index: None,
             });
         }
     }
 
     found
+}
+
+/// Probe TL LCD identities via rusb. Hidapi reads alias across daisy-chained
+/// TL LCDs (3+ devices sharing iSerial collide somewhere below us), so the
+/// daemon always uses rusb for this family regardless of `hid_driver` setting.
+pub fn probe_tl_lcd_port_indices_rusb(
+    devices: &[DetectedDevice],
+) -> std::collections::HashMap<String, (u8, u8)> {
+    use lianli_transport::{HidBackend, RusbHidTransport};
+    let mut out = std::collections::HashMap::new();
+    for det in devices.iter().filter(|d| d.family == DeviceFamily::TlLcd) {
+        let transport =
+            match RusbHidTransport::open_by_usage(det.device.clone(), det.hid_usage_page) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("TL LCD rusb open failed for {}: {e:#}", det.device_id());
+                    continue;
+                }
+            };
+        let backend = Arc::new(Mutex::new(HidBackend::from_rusb(transport)));
+        let tl = crate::tl_lcd::TlLcdDevice::new(backend);
+        match tl.read_identity_raw() {
+            Ok(ident) => {
+                out.insert(det.device_id(), (ident.port, ident.index));
+            }
+            Err(e) => warn!("TL LCD identity read failed for {}: {e:#}", det.device_id()),
+        }
+    }
+    out
 }
 
 /// Find HID devices matching a specific family.

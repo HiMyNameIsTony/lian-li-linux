@@ -238,7 +238,9 @@ export component FansPage inherits VerticalLayout {
     in property <[string]> curve-names: [];
     in property <[string]> speed-options: [];
     in property <[string]> sensor-options: [];
-    in property <int> update-interval: 500;
+    in property <int> update-interval: 1000;
+    in property <float> hysteresis-temp: 1.0;
+    in property <int> hysteresis-pwm: 5;
     in property <bool> has-config: false;
 
     callback add-curve();
@@ -255,6 +257,8 @@ export component FansPage inherits VerticalLayout {
     callback set-slot-pwm(string, int, int);
     callback set-pwm-header(string, int, string);
     callback set-update-interval(int);
+    callback set-hysteresis-temp(float);
+    callback set-hysteresis-pwm(int);
     callback save-config();
 
     PageHeader {
@@ -341,27 +345,75 @@ export component FansPage inherits VerticalLayout {
                 }
             }
 
-            // Update interval
+            // Update interval + hysteresis
             if root.has-config: Card {
-                HorizontalLayout {
+                VerticalLayout {
                     spacing: 8px;
-                    Text {
-                        text: "Update interval:";
-                        font-size: 13px;
-                        color: Theme.text-primary;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Update interval:";
+                            width: 160px;
+                            font-size: 13px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        SpinBox {
+                            value: root.update-interval;
+                            minimum: 100;
+                            maximum: 10000;
+                            edited(val) => { root.set-update-interval(val); }
+                        }
+                        Text {
+                            text: "ms";
+                            font-size: 13px;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
                     }
-                    SpinBox {
-                        value: root.update-interval;
-                        minimum: 100;
-                        maximum: 10000;
-                        edited(val) => { root.set-update-interval(val); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Hysteresis (temp):";
+                            width: 160px;
+                            font-size: 13px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        SpinBox {
+                            value: root.hysteresis-temp * 10;
+                            minimum: 0;
+                            maximum: 100;
+                            edited(val) => { root.set-hysteresis-temp(val / 10); }
+                        }
+                        Text {
+                            text: "x 0.1 °C";
+                            font-size: 13px;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
                     }
-                    Text {
-                        text: "ms";
-                        font-size: 13px;
-                        color: Theme.text-secondary;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Hysteresis (PWM):";
+                            width: 160px;
+                            font-size: 13px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        SpinBox {
+                            value: root.hysteresis-pwm;
+                            minimum: 0;
+                            maximum: 50;
+                            edited(val) => { root.set-hysteresis-pwm(val); }
+                        }
+                        Text {
+                            text: "/ 255";
+                            font-size: 13px;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

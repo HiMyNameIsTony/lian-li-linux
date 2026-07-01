@@ -59,18 +59,20 @@ pub fn create_wired_controllers(
         )),
         DeviceFamily::Galahad2Trinity => Some(
             crate::galahad2_trinity::Galahad2TrinityController::new(backend, pid).map(|c| {
+                let ctrl = Arc::new(c);
                 WiredControllerSet {
-                    fan: None,
+                    fan: Some(Box::new(Arc::clone(&ctrl))),
                     rgb: vec![(
                         String::new(),
-                        Box::new(c) as Box<dyn crate::traits::RgbDevice>,
+                        Box::new(ctrl) as Box<dyn crate::traits::RgbDevice>,
                     )],
                 }
             }),
         ),
         DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => Some(
             crate::hydroshift_lcd::HydroShiftLcdController::new(Arc::clone(&backend), pid)
-                .and_then(|lcd_ctrl| {
+                .and_then(|mut lcd_ctrl| {
+                    crate::traits::LcdDevice::initialize(&mut lcd_ctrl)?;
                     let rgb_ctrl = crate::hydroshift_lcd::AioLcdRgbController::new(backend, pid)?;
                     Ok(WiredControllerSet {
                         fan: Some(Box::new(Arc::new(lcd_ctrl))),

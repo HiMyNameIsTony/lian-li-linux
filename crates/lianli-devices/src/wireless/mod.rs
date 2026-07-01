@@ -21,6 +21,21 @@ const TX_IDS: [(u16, u16); 2] = [(0x0416, 0x8040), (0x1A86, 0xE304)];
 /// RX dongle VID:PID pairs (V1 and V2 hardware).
 const RX_IDS: [(u16, u16); 2] = [(0x0416, 0x8041), (0x1A86, 0xE305)];
 
+pub fn tx_dongle_present() -> bool {
+    let Ok(devices) = rusb::devices() else {
+        return false;
+    };
+    for device in devices.iter() {
+        if let Ok(desc) = device.device_descriptor() {
+            let id = (desc.vendor_id(), desc.product_id());
+            if TX_IDS.contains(&id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 const USB_CMD_SEND_RF: u8 = 0x10;
 const USB_CMD_GET_MAC: u8 = 0x11;
 

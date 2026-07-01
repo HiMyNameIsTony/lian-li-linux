@@ -265,6 +265,8 @@ impl WinUsbLcdDevice {
 
         let resp = self.read_response("h264 chunk", LCD_READ_TIMEOUT);
 
+        std::thread::sleep(Duration::from_millis(30));
+
         if let Some(buf) = resp {
             if buf[8] > 3 {
                 self.wait_buffer(2);

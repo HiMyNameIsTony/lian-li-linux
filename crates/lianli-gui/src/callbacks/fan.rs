@@ -218,10 +218,7 @@ pub(crate) fn wire_fan_callbacks(
             {
                 let mut state = shared.lock().unwrap();
                 if let Some(ref mut c) = state.config {
-                    let fc = c.fans.get_or_insert_with(|| FanConfig {
-                        speeds: vec![],
-                        update_interval_ms: 500,
-                    });
+                    let fc = c.fans.get_or_insert_with(FanConfig::default);
                     let group = fc
                         .speeds
                         .iter_mut()
@@ -265,10 +262,7 @@ pub(crate) fn wire_fan_callbacks(
             {
                 let mut state = shared.lock().unwrap();
                 if let Some(ref mut c) = state.config {
-                    let fc = c.fans.get_or_insert_with(|| FanConfig {
-                        speeds: vec![],
-                        update_interval_ms: 500,
-                    });
+                    let fc = c.fans.get_or_insert_with(FanConfig::default);
                     if let Some(group) = fc
                         .speeds
                         .iter_mut()
@@ -322,10 +316,7 @@ pub(crate) fn wire_fan_callbacks(
             {
                 let mut state = shared.lock().unwrap();
                 if let Some(ref mut c) = state.config {
-                    let fc = c.fans.get_or_insert_with(|| FanConfig {
-                        speeds: vec![],
-                        update_interval_ms: 500,
-                    });
+                    let fc = c.fans.get_or_insert_with(FanConfig::default);
                     if let Some(group) = fc
                         .speeds
                         .iter_mut()

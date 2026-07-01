@@ -187,6 +187,9 @@ impl ServiceManager {
                 if !lianli_shared::device_id::uses_hid(det.family) {
                     continue;
                 }
+                if det.family == lianli_shared::device_id::DeviceFamily::TlLcd {
+                    continue;
+                }
                 let base_id = Self::rusb_device_id(&det);
                 let backend = match self.get_or_open_backend_rusb(&det) {
                     Ok(b) => b,
@@ -220,6 +223,9 @@ impl ServiceManager {
                 }
             };
             for det in enumerate_hid_devices(&api) {
+                if det.family == lianli_shared::device_id::DeviceFamily::TlLcd {
+                    continue;
+                }
                 let base_id = det.device_id();
                 let backend = match self.get_or_open_backend_hidapi(&api, &base_id, &det) {
                     Ok(b) => b,
@@ -368,6 +374,7 @@ impl ServiceManager {
                             max_fan_quantity: max_quantity,
                             firmware_version: None,
                             supports_c_command: false,
+                            port_index: None,
                         });
                     }
                     fan_devices.insert(base_id.to_string(), fan_ctrl);
@@ -556,8 +563,11 @@ impl ServiceManager {
         }
     }
 
-    /// Try to connect wireless TX/RX once. Non-blocking — if no dongles found, skip gracefully.
     pub(super) fn try_wireless(&mut self) {
+        if !lianli_devices::wireless::tx_dongle_present() {
+            debug!("[wireless] no TX/RX devices found, skipping wireless");
+            return;
+        }
         match self.wireless.connect() {
             Ok(()) => match self.wireless.start_polling() {
                 Ok(()) => {

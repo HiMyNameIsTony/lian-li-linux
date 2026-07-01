@@ -130,36 +130,52 @@ fn fan_control_thread(
 
     let mut temp_ema: HashMap<SensorSource, f32> = HashMap::new();
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
+    let mut fan_states: HashMap<usize, FanState> = HashMap::new();
 
-    // Initialize MB sync state for all wired groups at startup.
-    for (group_idx, group) in config.speeds.iter().enumerate() {
+    let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
+    for group in config.speeds.iter() {
         let is_mb_sync = group.speeds.iter().any(|s| s.is_mb_sync());
         if let Some(ref device_id) = group.device_id {
             if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
-                if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
-                    if dev.supports_mb_sync() {
-                        if let Err(err) = dev.set_mb_rpm_sync(port, is_mb_sync) {
-                            warn!("Failed to set MB sync for {device_id}: {err}");
-                        } else if is_mb_sync {
-                            info!("MB RPM sync enabled for {device_id}");
-                        }
-                    }
+                if let Ok(port) = port_str.parse::<u8>() {
+                    mb_sync_init
+                        .entry(base_id.to_string())
+                        .or_default()
+                        .insert(port, is_mb_sync);
                 }
             } else if let Some(dev) = wired.get(device_id) {
-                if dev.supports_mb_sync() {
-                    if let Err(err) = dev.set_mb_rpm_sync(0, is_mb_sync) {
-                        warn!("Failed to set MB sync for {device_id}: {err}");
-                    } else if is_mb_sync {
-                        info!("MB RPM sync enabled for {device_id}");
-                    }
+                for (port, _) in dev.fan_port_info() {
+                    mb_sync_init
+                        .entry(device_id.clone())
+                        .or_default()
+                        .insert(port, is_mb_sync);
                 }
             }
         }
-        if is_mb_sync {
-            debug!(
-                "Group {group_idx} ({}): MB RPM sync mode",
-                group.device_id.as_deref().unwrap_or("none")
-            );
+    }
+    for (device_id, ports) in mb_sync_init {
+        if let Some((base_id, _)) = device_id.rsplit_once(":port") {
+            if let Some(dev) = wired.get(base_id) {
+                if dev.supports_mb_sync() {
+                    for (port, sync) in ports {
+                        if let Err(err) = dev.set_mb_rpm_sync(port, sync) {
+                            warn!("Failed to set MB sync for {device_id} port {port}: {err}");
+                        } else if sync {
+                            info!("MB RPM sync enabled for {device_id} port {port}");
+                        }
+                    }
+                }
+            }
+        } else if let Some(dev) = wired.get(&device_id) {
+            if dev.supports_mb_sync() {
+                for (port, sync) in ports {
+                    if let Err(err) = dev.set_mb_rpm_sync(port, sync) {
+                        warn!("Failed to set MB sync for {device_id} port {port}: {err}");
+                    } else if sync {
+                        info!("MB RPM sync enabled for {device_id} port {port}");
+                    }
+                }
+            }
         }
     }
 
@@ -243,6 +259,9 @@ fn fan_control_thread(
                 &mut sensor_cache,
                 &mut temp_ema,
                 all_sensors,
+                fan_states.get(&group_idx),
+                config.hysteresis_temp,
+                config.hysteresis_pwm,
             ) {
                 Ok(speeds) => speeds,
                 Err(err) => {
@@ -251,25 +270,39 @@ fn fan_control_thread(
                 }
             };
 
+            let group_temp = group.speeds.iter().find_map(|s| match s {
+                FanSpeed::Curve(name) => curves
+                    .get(name)
+                    .and_then(|c| temp_ema.get(&c.effective_source()).copied()),
+                _ => None,
+            });
+            fan_states
+                .entry(group_idx)
+                .and_modify(|s| s.update(speeds, group_temp))
+                .or_insert_with(|| FanState::new(speeds, group_temp));
+
             // Try to apply to the right device
             if let Some(ref device_id) = group.device_id {
                 if device_id.starts_with("wireless:") {
                     apply_wireless_by_id(&wireless, device_id, &speeds, group_idx);
                 } else if let Some((base_id, port_str)) = device_id.rsplit_once(":port") {
-                    // Per-port wired device (e.g. "Nuvoton:port0")
                     if let (Some(dev), Ok(port)) = (wired.get(base_id), port_str.parse::<u8>()) {
-                        if let Err(err) = dev.set_fan_speed(port, speeds[0]) {
+                        let stop = dev.stop_pwm();
+                        let mapped = map_stop(&speeds, stop);
+                        if let Err(err) = dev.set_fan_speed(port, mapped[0]) {
                             warn!("Failed to set fan speed for {device_id}: {err}");
                         }
                     } else {
                         warn!("Fan group {group_idx}: device '{device_id}' not found");
                     }
                 } else if let Some(dev) = wired.get(device_id) {
-                    if let Err(err) = dev.set_fan_speeds(&speeds) {
+                    let stop = dev.stop_pwm();
+                    let mapped = map_stop(&speeds, stop);
+                    if let Err(err) = dev.set_fan_speeds(&mapped) {
                         warn!("Failed to set fan speeds for {device_id}: {err}");
                     }
                     if dev.has_pump_control() {
-                        if let Err(err) = dev.set_pump_speed(speeds[3]) {
+                        if let Err(err) = dev.set_pump_speed(mapped[3]) {
                             warn!("Failed to set pump speed for {device_id}: {err}");
                         }
                     }
@@ -277,7 +310,6 @@ fn fan_control_thread(
                     warn!("Fan group {group_idx}: device '{device_id}' not found");
                 }
             } else {
-                // Legacy: match by group index to wireless devices
                 if let Some(ref w) = wireless {
                     if let Err(err) = w.set_fan_speeds(group_idx as u8, &speeds) {
                         warn!("Failed to set fan speeds for wireless device {group_idx}: {err}");
@@ -297,6 +329,15 @@ fn fan_control_thread(
     }
 
     info!("Fan control thread stopped");
+}
+
+fn map_stop(speeds: &[u8; 4], stop: u8) -> [u8; 4] {
+    [
+        if speeds[0] == 0 { stop } else { speeds[0] },
+        if speeds[1] == 0 { stop } else { speeds[1] },
+        if speeds[2] == 0 { stop } else { speeds[2] },
+        if speeds[3] == 0 { stop } else { speeds[3] },
+    ]
 }
 
 fn apply_wireless_by_id(
@@ -326,12 +367,65 @@ fn apply_wireless_by_id(
 /// 0.3 means ~70% of the smoothed value comes from history.
 const TEMP_EMA_ALPHA: f32 = 0.3;
 
+/// Per-group state for PWM hysteresis. EMA smooths sensor noise; this
+/// suppresses PWM chatter when temp oscillates around a curve breakpoint.
+#[derive(Clone, Debug)]
+struct FanState {
+    last_pwm: [u8; 4],
+    last_temp: Option<f32>,
+}
+
+impl FanState {
+    fn new(pwm: [u8; 4], temp: Option<f32>) -> Self {
+        Self {
+            last_pwm: pwm,
+            last_temp: temp,
+        }
+    }
+
+    fn update(&mut self, pwm: [u8; 4], temp: Option<f32>) {
+        let pwm_changed = pwm != self.last_pwm;
+        self.last_pwm = pwm;
+        if pwm_changed && temp.is_some() {
+            self.last_temp = temp;
+        }
+    }
+}
+
+/// Suppress small PWM changes when temp is near the last applied point.
+/// Keeps the last PWM if both PWM delta and temp delta are below threshold;
+/// otherwise applies the target.
+fn apply_hysteresis(
+    target_pwm: u8,
+    current_temp: f32,
+    fan_idx: usize,
+    state: &FanState,
+    hysteresis_temp: f32,
+    hysteresis_pwm: u8,
+) -> u8 {
+    let last_pwm = state.last_pwm[fan_idx];
+    let pwm_delta = target_pwm.abs_diff(last_pwm);
+    let temp_delta = state
+        .last_temp
+        .map(|prev| (current_temp - prev).abs())
+        .unwrap_or(f32::INFINITY);
+
+    if pwm_delta < hysteresis_pwm && temp_delta < hysteresis_temp {
+        last_pwm
+    } else {
+        target_pwm
+    }
+}
+
 fn calculate_fan_speeds(
     fan_speeds: &[FanSpeed; 4],
     curves: &HashMap<String, FanCurve>,
     sensor_cache: &mut HashMap<SensorSource, ResolvedSensor>,
     temp_ema: &mut HashMap<SensorSource, f32>,
     all_sensors: &[SensorInfo],
+    prev_state: Option<&FanState>,
+    hysteresis_temp: f32,
+    hysteresis_pwm: u8,
 ) -> Result<[u8; 4]> {
     let mut pwm_values = [0u8; 4];
 
@@ -353,7 +447,19 @@ fn calculate_fan_speeds(
                 let source = curve.effective_source();
                 let temp = smoothed_temperature(&source, sensor_cache, temp_ema, all_sensors)?;
                 let speed_percent = interpolate_curve(&curve.curve, temp);
-                let pwm = (speed_percent * 2.55) as u8;
+                let target_pwm = (speed_percent * 2.55) as u8;
+
+                let pwm = match prev_state {
+                    Some(state) => apply_hysteresis(
+                        target_pwm,
+                        temp,
+                        i,
+                        state,
+                        hysteresis_temp,
+                        hysteresis_pwm,
+                    ),
+                    None => target_pwm,
+                };
 
                 debug!("Fan {i}: Temp {temp:.1}C, Speed {speed_percent:.0}%, PWM {pwm}");
                 pwm

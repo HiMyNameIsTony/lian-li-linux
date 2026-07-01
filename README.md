@@ -20,7 +20,7 @@
 | UNI FAN SL / AL / SL Infinity / SL V2 / AL V2 | 4 groups | Yes | - | - | Yes |
 | UNI FAN TL Controller | 4 ports | Yes | - | - | Yes |
 | UNI FAN TL LCD | 4 ports | Yes | 400x400 | - | Yes |
-| Galahad II Trinity AIO | Yes | Yes | - | Yes | - |
+| Galahad II Trinity AIO | Yes | Yes | - | Yes | Yes |
 | HydroShift LCD AIO | Yes | Yes | 480x480 | Yes | Yes |
 | Galahad II LCD / Vision AIO | Yes | Yes | 480x480 | Yes | Yes |
 
@@ -34,8 +34,8 @@
 | UNI FAN SL V3 (LCD / LED) | Yes | Yes | 400x400 | - | Yes |
 | UNI FAN SL-INF | Yes | Yes | - | - | Yes |
 | UNI FAN CL / RL120 | Yes | Yes | - | - | - |
-| HydroShift II LCD-C (Wireless) | Yes | Yes | - | Yes | - |
-| HydroShift II LCD-S (Wireless) | Yes | Yes | - | Yes | - |
+| HydroShift II LCD-C (Wireless) | Yes | Yes | - | Yes | Yes |
+| HydroShift II LCD-S (Wireless) | Yes | Yes | - | Yes | Yes |
 | Strimer Plus Wireless | - | Yes | - | - | Yes |
 | Lancool 217 Wireless | - | Yes | - | - | - |
 | Lancool V150 Wireless | Yes | Yes | - | - | - |
@@ -146,6 +146,8 @@ sudo dnf install hidapi-devel libusb1-devel fontconfig-devel \
   ffmpeg-devel nasm
 # evdi is not packaged in Fedora repos — build libevdi from source to link the daemon:
 #   https://github.com/DisplayLink/evdi  (evdi-dkms is only needed at runtime)
+# You can also download https://github.com/displaylink-rpm/displaylink-rpm
+# Make sure to install replace ffmpeg-free with ffmpeg if ffmpeg-free is installed
 ```
 
 3) Build:
@@ -198,24 +200,11 @@ update-desktop-database ~/.local/share/applications/
 
 ### With Docker
 
-1) Build the Docker image:
 ```bash
-docker build -f docker/build.Dockerfile -t lianli-linux-builder \
-  --build-arg USER_ID="$(id -u)" \
-  --build-arg GROUP_ID="$(id -g)" \
-  .
-```
-2) Build the project:
-```bash
-docker run --rm -it \
-  -v "$PWD:/work" \
-  -v "$PWD/target:/work/target" \
-  -v "$PWD/.cache/cargo-registry:/home/builder/.cargo/registry" \
-  -v "$PWD/.cache/cargo-git:/home/builder/.cargo/git" \
-  lianli-linux-builder
+./docker/build.sh
 ```
 
-Then follow steps 4-6 from "From Source" above.
+The script builds the image (matching your UID/GID), mounts a cargo cache, and runs `cargo build --release`. Artifacts land in `target/release/` on the host. Then follow steps 4-6 from "From Source" above.
 
 ## Configuration
 

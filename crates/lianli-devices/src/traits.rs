@@ -60,6 +60,10 @@ pub trait FanDevice: Send + Sync {
     fn set_port_fan_quantity(&self, _port: u8, _quantity: u8) -> Result<()> {
         anyhow::bail!("Fan quantity override not supported by this device")
     }
+
+    fn stop_pwm(&self) -> u8 {
+        0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +92,9 @@ pub trait LcdDevice: Send + Sync {
         None
     }
     fn set_use_c_command(&mut self, _enable: bool) {}
+    fn try_read_firmware(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn stream_h264_reader(
         &mut self,
         _reader: &mut dyn std::io::Read,

@@ -90,6 +90,7 @@ fn render_template_preview(template: &LcdTemplate, sensors: &[SensorInfo]) -> Re
         jpeg_quality: 85,
         max_payload: 4 * 1024 * 1024,
         h264: false,
+        needs_keepalive: false,
     };
     let asset =
         CustomAsset::new(template, 0.0, &screen, sensors, false).context("CustomAsset::new")?;

@@ -223,12 +223,22 @@ impl TlFanController {
     }
 
     pub fn set_port_speed(&self, port: u8, duty: u8) -> Result<()> {
-        let fan_count = self
+        let mut fan_count = self
             .last_handshake
             .lock()
             .as_ref()
             .map(|hs| hs.port_fan_counts[port as usize])
             .unwrap_or(1);
+
+        if fan_count == 0 {
+            let _ = self.handshake();
+            fan_count = self
+                .last_handshake
+                .lock()
+                .as_ref()
+                .map(|hs| hs.port_fan_counts[port as usize])
+                .unwrap_or(1);
+        }
 
         for idx in 0..fan_count {
             self.set_fan_speed_single(port, idx, duty)?;
@@ -238,12 +248,21 @@ impl TlFanController {
 
     /// Set all port speeds atomically under one device lock.
     pub fn set_all_port_speeds(&self, duties: &[u8]) -> Result<()> {
-        let fan_counts: [u8; 4] = self
+        let mut fan_counts: [u8; 4] = self
             .last_handshake
             .lock()
             .as_ref()
             .map(|hs| hs.port_fan_counts)
             .unwrap_or([1, 1, 1, 1]);
+        if fan_counts.iter().all(|&c| c == 0) {
+            let _ = self.handshake();
+            fan_counts = self
+                .last_handshake
+                .lock()
+                .as_ref()
+                .map(|hs| hs.port_fan_counts)
+                .unwrap_or([1, 1, 1, 1]);
+        }
         let mut dev = self.device.lock();
         for (port, &duty) in duties.iter().take(4).enumerate() {
             for idx in 0..fan_counts[port] {
@@ -521,6 +540,10 @@ impl FanDevice for TlFanController {
     fn set_mb_rpm_sync(&self, port: u8, sync: bool) -> Result<()> {
         self.set_port_mb_rpm_sync(port, sync)
     }
+
+    fn stop_pwm(&self) -> u8 {
+        1
+    }
 }
 
 /// `Arc<TlFanController>` can be used directly as a `FanDevice`.
@@ -549,5 +572,9 @@ impl FanDevice for Arc<TlFanController> {
     }
     fn set_mb_rpm_sync(&self, port: u8, sync: bool) -> Result<()> {
         self.set_port_mb_rpm_sync(port, sync)
+    }
+
+    fn stop_pwm(&self) -> u8 {
+        1
     }
 }

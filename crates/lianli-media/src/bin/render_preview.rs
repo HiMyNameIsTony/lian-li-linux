@@ -69,6 +69,7 @@ fn main() -> Result<()> {
         jpeg_quality: 100,
         max_payload: usize::MAX,
         h264: false,
+        needs_keepalive: false,
     };
 
     let asset = CustomAsset::new(&template, 0.0, &screen, &[], false)

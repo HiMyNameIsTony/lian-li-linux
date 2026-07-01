@@ -9,6 +9,7 @@ pub struct ScreenInfo {
     pub jpeg_quality: u8,
     pub max_payload: usize,
     pub h264: bool,
+    pub needs_keepalive: bool,
 }
 
 impl ScreenInfo {
@@ -20,6 +21,7 @@ impl ScreenInfo {
         jpeg_quality: 90,
         max_payload: 102_400 - 512,
         h264: false,
+        needs_keepalive: false,
     };
 
     pub const TLLCD: Self = Self {
@@ -29,6 +31,7 @@ impl ScreenInfo {
         jpeg_quality: 90,
         max_payload: 65_535,
         h264: false,
+        needs_keepalive: true,
     };
 
     pub const AIO_LCD_480: Self = Self {
@@ -38,6 +41,7 @@ impl ScreenInfo {
         jpeg_quality: 85,
         max_payload: 153_600,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const HYDROSHIFT2: Self = Self {
@@ -47,6 +51,7 @@ impl ScreenInfo {
         jpeg_quality: 85,
         max_payload: 153_600,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const LANCOOL_207: Self = Self {
@@ -55,7 +60,18 @@ impl ScreenInfo {
         max_fps: 30,
         jpeg_quality: 95,
         max_payload: 512_000,
+        h264: false,
+        needs_keepalive: false,
+    };
+
+    pub const LANCOOL_207_H264: Self = Self {
+        width: 720,
+        height: 1472,
+        max_fps: 30,
+        jpeg_quality: 95,
+        max_payload: 512_000,
         h264: true,
+        needs_keepalive: false,
     };
 
     pub const UNIVERSAL_SCREEN: Self = Self {
@@ -65,7 +81,14 @@ impl ScreenInfo {
         jpeg_quality: 95,
         max_payload: 512_000,
         h264: true,
+        needs_keepalive: false,
     };
+}
+
+fn lancool207_h264_enabled() -> bool {
+    std::env::var("LIANLI_LANCOOL207_H264")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
 }
 
 /// Get the screen info for a given device family.
@@ -76,7 +99,11 @@ pub fn screen_info_for(family: DeviceFamily) -> Option<ScreenInfo> {
         DeviceFamily::TlLcd => Some(ScreenInfo::TLLCD),
         DeviceFamily::HydroShiftLcd | DeviceFamily::Galahad2Lcd => Some(ScreenInfo::AIO_LCD_480),
         DeviceFamily::HydroShift2Lcd => Some(ScreenInfo::HYDROSHIFT2),
-        DeviceFamily::Lancool207 => Some(ScreenInfo::LANCOOL_207),
+        DeviceFamily::Lancool207 => Some(if lancool207_h264_enabled() {
+            ScreenInfo::LANCOOL_207_H264
+        } else {
+            ScreenInfo::LANCOOL_207
+        }),
         DeviceFamily::UniversalScreen => Some(ScreenInfo::UNIVERSAL_SCREEN),
         _ => None,
     }
