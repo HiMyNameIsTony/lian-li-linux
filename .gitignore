@@ -10,3 +10,6 @@ dist/
 .cache
 /refresh.sh
 /shell.nix
+/capture-lianli.sh
+/captures/
+/analyze-capture.py
