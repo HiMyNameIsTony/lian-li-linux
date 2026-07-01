@@ -502,6 +502,7 @@ impl AsyncSensorRenderer {
         tx: Option<Sender<DaemonEvent>>,
         asset: Arc<SensorAsset>,
         baseasset: Arc<MediaAsset>,
+        keep_alive_on_no_change: bool,
     ) -> Self {
         let initial = match asset.render_frame(true) {
             Ok(Some(frame)) => frame,
@@ -529,21 +530,24 @@ impl AsyncSensorRenderer {
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                match asset_clone.render_frame(false) {
+                match asset_clone.render_frame(keep_alive_on_no_change) {
                     Ok(Some(new_frame)) => {
                         *frame_clone.lock() = new_frame;
-                        if let Some(ref tx) = tx_for_thread {
-                            let event = DaemonEvent::FrameFinished {
-                                asset: Arc::clone(&asset_for_thread),
-                            };
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        frame_clone.lock().frame_index += 1;
+                    }
                     Err(err) => {
                         warn!("sensor background render failed: {err}");
+                        continue;
+                    }
+                }
+                if let Some(ref tx) = tx_for_thread {
+                    let event = DaemonEvent::FrameFinished {
+                        asset: Arc::clone(&asset_for_thread),
+                    };
+                    if tx.send(event).is_err() {
+                        break;
                     }
                 }
             }
@@ -653,6 +657,7 @@ impl AsyncCustomRenderer {
         tx: Option<Sender<DaemonEvent>>,
         asset: Arc<CustomAsset>,
         baseasset: Arc<MediaAsset>,
+        keep_alive_on_no_change: bool,
     ) -> Self {
         let initial = match asset.render_frame(true) {
             Ok(Some(frame)) => frame,
@@ -688,7 +693,7 @@ impl AsyncCustomRenderer {
                 if next_deadline < Instant::now() {
                     next_deadline = Instant::now() + update_interval;
                 }
-                match asset_clone.render_frame(false) {
+                match asset_clone.render_frame(keep_alive_on_no_change) {
                     Ok(Some(new_frame)) => {
                         *frame_clone.lock() = new_frame;
                         if let Some(ref tx) = tx_for_thread {
@@ -945,6 +950,7 @@ impl MediaRuntime {
                     tx,
                     Arc::clone(sensor_asset),
                     Arc::clone(&asset),
+                    screen.needs_keepalive,
                 ));
                 let cached_frame = renderer.get_current_frame();
                 Self::Sensor {
@@ -995,6 +1001,7 @@ impl MediaRuntime {
                     tx,
                     Arc::clone(custom_asset),
                     Arc::clone(&asset),
+                    screen.needs_keepalive,
                 ));
 
                 let cached_frame = renderer.get_current_frame();

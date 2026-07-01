@@ -57,7 +57,7 @@ impl HydroShiftLcdController {
         let variant = AioLcdVariant::from_pid(pid)
             .ok_or_else(|| anyhow::anyhow!("Unknown AIO LCD PID: {pid:#06x}"))?;
 
-        let mut ctrl = Self {
+        Ok(Self {
             device,
             variant,
             last_handshake: None,
@@ -68,10 +68,7 @@ impl HydroShiftLcdController {
             firmware_string: None,
             firmware_version: None,
             last_recovery_attempt: None,
-        };
-
-        ctrl.init()?;
-        Ok(ctrl)
+        })
     }
 
     fn init(&mut self) -> Result<()> {
@@ -79,15 +76,6 @@ impl HydroShiftLcdController {
             return Ok(());
         }
         info!("Initializing {}", self.variant.name());
-
-        match self.read_firmware_internal(INIT_READ_TIMEOUT_MS) {
-            Ok(fw) => {
-                self.firmware_version = parse_firmware_version(&fw);
-                self.firmware_string = Some(fw.clone());
-                info!("  Firmware: {fw}");
-            }
-            Err(e) => warn!("  Failed to read firmware: {e:#}"),
-        }
 
         match self.handshake() {
             Ok(hs) => {
@@ -127,6 +115,17 @@ impl HydroShiftLcdController {
 
     pub fn firmware_version_str(&self) -> Option<&str> {
         self.firmware_string.as_deref()
+    }
+
+    pub fn try_read_firmware(&mut self) -> Result<()> {
+        if self.firmware_version.is_some() {
+            return Ok(());
+        }
+        let fw = self.read_firmware_internal(INIT_READ_TIMEOUT_MS)?;
+        self.firmware_version = parse_firmware_version(&fw);
+        self.firmware_string = Some(fw.clone());
+        info!("AIO LCD firmware for {}: {fw}", self.variant.name());
+        Ok(())
     }
 
     pub fn handshake(&mut self) -> Result<AioHandshake> {
@@ -265,8 +264,6 @@ impl HydroShiftLcdController {
         }
     }
 
-    /// Reset device (A-command 0x8E). Device may emit a transient status byte `2`
-    /// before the final `1` — both must be drained.
     pub fn reset_device(&self) -> bool {
         const MAX_ATTEMPTS: u32 = 20;
 
@@ -648,6 +645,10 @@ impl LcdDevice for HydroShiftLcdController {
 
     fn set_use_c_command(&mut self, enable: bool) {
         HydroShiftLcdController::set_use_c_command(self, enable);
+    }
+
+    fn try_read_firmware(&mut self) -> Result<()> {
+        HydroShiftLcdController::try_read_firmware(self)
     }
 
     fn stream_h264_reader(

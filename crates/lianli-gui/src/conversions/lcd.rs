@@ -197,6 +197,9 @@ pub fn lcd_device_label(device: &DeviceInfo) -> String {
     } else {
         device.name.clone()
     };
+    if let Some((port, fan)) = device.port_index {
+        return format!("{name} (port {port}, fan {fan})");
+    }
     let serial = device.serial.as_deref().unwrap_or(&device.device_id);
     format!("{name} ({serial})")
 }

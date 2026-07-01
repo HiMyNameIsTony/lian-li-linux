@@ -225,11 +225,42 @@ fn main() {
         window.on_fan_set_update_interval(move |ms| {
             let mut state = shared.lock().unwrap();
             if let Some(ref mut c) = state.config {
-                let fc = c.fans.get_or_insert_with(|| FanConfig {
-                    speeds: vec![],
-                    update_interval_ms: 500,
-                });
+                let fc = c.fans.get_or_insert_with(FanConfig::default);
                 fc.update_interval_ms = ms as u64;
+            }
+            drop(state);
+            if let Some(w) = weak.upgrade() {
+                w.set_config_dirty(true);
+            }
+        });
+    }
+
+    // ── Set fan hysteresis (temp) ──
+    {
+        let shared = shared.clone();
+        let weak = window.as_weak();
+        window.on_fan_set_hysteresis_temp(move |v| {
+            let mut state = shared.lock().unwrap();
+            if let Some(ref mut c) = state.config {
+                let fc = c.fans.get_or_insert_with(FanConfig::default);
+                fc.hysteresis_temp = v.max(0.0);
+            }
+            drop(state);
+            if let Some(w) = weak.upgrade() {
+                w.set_config_dirty(true);
+            }
+        });
+    }
+
+    // ── Set fan hysteresis (PWM) ──
+    {
+        let shared = shared.clone();
+        let weak = window.as_weak();
+        window.on_fan_set_hysteresis_pwm(move |v| {
+            let mut state = shared.lock().unwrap();
+            if let Some(ref mut c) = state.config {
+                let fc = c.fans.get_or_insert_with(FanConfig::default);
+                fc.hysteresis_pwm = v.clamp(0, 255) as u8;
             }
             drop(state);
             if let Some(w) = weak.upgrade() {

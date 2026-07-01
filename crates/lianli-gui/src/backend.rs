@@ -301,7 +301,17 @@ fn load_config(window: &slint::Weak<crate::MainWindow>, shared: &crate::Shared) 
             .fans
             .as_ref()
             .map(|f| f.update_interval_ms as i32)
-            .unwrap_or(500);
+            .unwrap_or(1000);
+        let fan_hysteresis_temp = config
+            .fans
+            .as_ref()
+            .map(|f| f.hysteresis_temp)
+            .unwrap_or(1.0);
+        let fan_hysteresis_pwm = config
+            .fans
+            .as_ref()
+            .map(|f| f.hysteresis_pwm as i32)
+            .unwrap_or(5);
         let hid_driver = match config.hid_driver {
             lianli_shared::config::HidDriver::Hidapi => "HIDAPI",
             lianli_shared::config::HidDriver::Rusb => "Rusb",
@@ -338,6 +348,8 @@ fn load_config(window: &slint::Weak<crate::MainWindow>, shared: &crate::Shared) 
                 w.set_fan_speed_options(speed_opts);
                 w.set_fan_sensor_options(conversions::sensor_options_model(&sensors, true));
                 w.set_fan_update_interval(fan_update_interval);
+                w.set_fan_hysteresis_temp(fan_hysteresis_temp);
+                w.set_fan_hysteresis_pwm(fan_hysteresis_pwm);
 
                 // Fan groups
                 let fan_cfg = config.fans.clone().unwrap_or_default();

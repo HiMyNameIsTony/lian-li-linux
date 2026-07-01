@@ -503,6 +503,7 @@ fn handle_request(
                 jpeg_quality: 90,
                 max_payload: 4 * 1024 * 1024,
                 h264: false,
+                needs_keepalive: false,
             };
             let all_sensors = lianli_shared::sensors::enumerate_sensors();
             match CustomAsset::new(&template, 0.0, &preview_screen, &all_sensors, false) {
