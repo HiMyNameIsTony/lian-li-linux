@@ -30,6 +30,23 @@ impl DirectColorBuffer {
             .insert(zone, colors);
     }
 
+    /// Patch a single LED inside an already-pending zone update.
+    /// Returns false when no pending vec covers that LED — the caller must
+    /// seed the zone from current device state instead.
+    pub fn patch_led(&mut self, device_id: &str, zone: u8, led: usize, color: [u8; 3]) -> bool {
+        match self
+            .pending
+            .get_mut(device_id)
+            .and_then(|zones| zones.get_mut(&zone))
+        {
+            Some(colors) if led < colors.len() => {
+                colors[led] = color;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Take all pending updates, clearing the buffer.
     pub fn take_all(&mut self) -> HashMap<String, HashMap<u8, Vec<[u8; 3]>>> {
         std::mem::take(&mut self.pending)

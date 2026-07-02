@@ -162,77 +162,62 @@ impl RgbController {
         if let (Some(ref wireless), Some(state)) =
             (&self.wireless, self.wireless_state.get_mut(device_id))
         {
-            let zone_idx = zone as usize;
-            let total_zones = wireless_total_zones(state);
-            let (slice_start, slice_len) = match wireless_zone_slice(state, zone_idx) {
-                Some(s) => s,
-                None => anyhow::bail!(
-                    "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})",
-                    state.fan_type, state.fan_count
-                ),
-            };
-
-            // For non-animated modes (Static, Off): always overwrite the
-            // slice with the rendered uniform color — that's the whole
-            // point of Static.
-            //
-            // For animated modes (Breathing, …): preserve any existing
-            // per-LED colors so the "set per-LED via Direct, then switch
-            // to Breathing" workflow works (each LED breathes its own
-            // color, matching how RAM controllers behave). But if the
-            // slice is currently all-black (no Direct setup yet), seed
-            // it with the effect's base color so the user sees SOMETHING
-            // when they pick Breathing on a fresh device.
-            if pattern_is_animated(effect.mode) {
-                let slice = &state.led_state[slice_start..slice_start + slice_len];
-                let slice_is_blank = slice.iter().all(|c| *c == [0, 0, 0]);
-                if slice_is_blank {
-                    let zone_color = render_zone_color(effect, slice_len);
-                    state.led_state[slice_start..slice_start + slice_len]
-                        .copy_from_slice(&zone_color);
-                }
-            } else {
-                let zone_color = render_zone_color(effect, slice_len);
-                state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
-            }
-
-            // Track this effect for composition, OR remove it (Static / Off
-            // are baked into led_state and don't need per-frame animation).
-            if pattern_is_animated(effect.mode) {
-                state.sub_zone_effects.insert(zone, effect.clone());
-            } else {
-                state.sub_zone_effects.remove(&zone);
-            }
-
-            // If any sub-zone wants animation, upload a composite frame
-            // sequence covering all of them. Otherwise upload a single frame
-            // (cheaper) and let the firmware hold it.
-            let idx = effect_index_from_state(&state.led_state);
-
-            if state.sub_zone_effects.is_empty() {
-                wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
-                debug!(
-                    "Set wireless RGB on {device_id} zone {zone}: {:?}, {} LEDs (no animation)",
-                    effect.mode, slice_len
-                );
-            } else {
-                let (frames, interval_ms) = render_composite_frames(state);
-                wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
-                // Don't poison led_state with rendered frame contents — it
-                // would cascade-corrupt subsequent set_effect calls (the
-                // animation's "middle" frame can be all-black depending on
-                // cycle parity, then the next zone sees a blank slice and
-                // re-seeds it with the mode's default color, looking like
-                // colors mysteriously reset). led_state stays as the
-                // unmodulated base colors that the composite paints from.
-                info!(
-                    "Uploaded composite ({} animated zone(s)) to {device_id}: {} frames @ {}ms",
-                    state.sub_zone_effects.len(),
-                    frames.len(),
-                    interval_ms
-                );
-            }
+            apply_zone_effect_state(state, zone, effect)?;
+            upload_wireless_state(wireless, state, device_id)?;
             return Ok(());
+        }
+
+        anyhow::bail!("RGB device not found: {device_id}");
+    }
+
+    /// Apply one effect to multiple zones of a device with a single RF
+    /// upload at the end.
+    ///
+    /// OpenRGB UpdateMode is device-wide; calling `set_effect` per zone
+    /// would upload the full bank state once per sub-zone (15× the RF
+    /// traffic on a 3-fan SL-Infinity bank — enough congestion to corrupt
+    /// discovery polls and garble the uploads themselves).
+    ///
+    /// For wired devices and rejected zones, falls back to per-zone calls.
+    /// Returns the first error encountered, but attempts every zone.
+    pub fn set_effect_zones(
+        &mut self,
+        device_id: &str,
+        zones: &[u8],
+        effect: &RgbEffect,
+    ) -> anyhow::Result<()> {
+        if self.wired.contains_key(device_id) {
+            // Wired path has no shared bank state — just delegate per-zone.
+            let mut first_err = None;
+            for zone in zones {
+                if let Err(e) = self.set_effect(device_id, *zone, effect) {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            return first_err.map(Err).unwrap_or(Ok(()));
+        }
+
+        if let (Some(ref wireless), Some(state)) =
+            (&self.wireless, self.wireless_state.get_mut(device_id))
+        {
+            let mut applied_any = false;
+            let mut first_err = None;
+            for zone in zones {
+                match apply_zone_effect_state(state, *zone, effect) {
+                    Ok(()) => applied_any = true,
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+            if applied_any {
+                upload_wireless_state(wireless, state, device_id)?;
+            }
+            return first_err.map(Err).unwrap_or(Ok(()));
         }
 
         anyhow::bail!("RGB device not found: {device_id}");
@@ -336,6 +321,26 @@ impl RgbController {
         }
 
         anyhow::bail!("RGB device not found: {device_id}");
+    }
+
+    /// Current colors of a wireless zone, from the cached full-bank LED state.
+    /// Wired devices don't cache LED state — returns None.
+    pub fn zone_colors(&self, device_id: &str, zone: u8) -> Option<Vec<[u8; 3]>> {
+        let state = self.wireless_state.get(device_id)?;
+        let (start, len) = wireless_zone_slice(state, zone as usize)?;
+        state.led_state.get(start..start + len).map(|s| s.to_vec())
+    }
+
+    /// The animated mode currently running on a wireless device, if any.
+    /// Static/Direct state is baked into `led_state` (no `sub_zone_effects`
+    /// entry) and reports None — callers should present that as Direct.
+    pub fn active_animated_mode(&self, device_id: &str) -> Option<RgbMode> {
+        self.wireless_state
+            .get(device_id)?
+            .sub_zone_effects
+            .values()
+            .next()
+            .map(|e| e.mode)
     }
 
     pub fn capabilities(&self) -> Vec<RgbDeviceCapabilities> {
@@ -678,6 +683,94 @@ fn breathing_cycles_per_window(speed: u8) -> u32 {
 /// - rgb-only: zone 0 covers all LEDs
 /// - AIO: zone 0 = Pump Head, then per-fan sub-zones
 /// - regular fan banks: per-fan sub-zones (1 zone for most, 5 zones for SL-Infinity)
+/// Update a zone's `led_state` slice and `sub_zone_effects` entry for an
+/// effect, without uploading. Callers decide when to upload (per-zone for
+/// `set_effect`, once per bank for `set_effect_zones`).
+fn apply_zone_effect_state(
+    state: &mut WirelessRgbState,
+    zone: u8,
+    effect: &RgbEffect,
+) -> anyhow::Result<()> {
+    let zone_idx = zone as usize;
+    let total_zones = wireless_total_zones(state);
+    let (slice_start, slice_len) = match wireless_zone_slice(state, zone_idx) {
+        Some(s) => s,
+        None => anyhow::bail!(
+            "Zone {zone} out of range (device has {total_zones} zones, fan_type={:?}, fan_count={})",
+            state.fan_type,
+            state.fan_count
+        ),
+    };
+
+    // For non-animated modes (Static, Off): always overwrite the
+    // slice with the rendered uniform color — that's the whole
+    // point of Static.
+    //
+    // For animated modes (Breathing, …): preserve any existing
+    // per-LED colors so the "set per-LED via Direct, then switch
+    // to Breathing" workflow works (each LED breathes its own
+    // color, matching how RAM controllers behave). But if the
+    // slice is currently all-black (no Direct setup yet), seed
+    // it with the effect's base color so the user sees SOMETHING
+    // when they pick Breathing on a fresh device.
+    if pattern_is_animated(effect.mode) {
+        let slice = &state.led_state[slice_start..slice_start + slice_len];
+        let slice_is_blank = slice.iter().all(|c| *c == [0, 0, 0]);
+        if slice_is_blank {
+            let zone_color = render_zone_color(effect, slice_len);
+            state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
+        }
+    } else {
+        let zone_color = render_zone_color(effect, slice_len);
+        state.led_state[slice_start..slice_start + slice_len].copy_from_slice(&zone_color);
+    }
+
+    // Track this effect for composition, OR remove it (Static / Off
+    // are baked into led_state and don't need per-frame animation).
+    if pattern_is_animated(effect.mode) {
+        state.sub_zone_effects.insert(zone, effect.clone());
+    } else {
+        state.sub_zone_effects.remove(&zone);
+    }
+
+    Ok(())
+}
+
+/// Upload a bank's current state: one direct frame if nothing is animated,
+/// otherwise one composite frame sequence covering all animated sub-zones.
+fn upload_wireless_state(
+    wireless: &WirelessController,
+    state: &WirelessRgbState,
+    device_id: &str,
+) -> anyhow::Result<()> {
+    let idx = effect_index_from_state(&state.led_state);
+
+    if state.sub_zone_effects.is_empty() {
+        wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
+        debug!(
+            "Set wireless RGB on {device_id}: {} LEDs (no animation)",
+            state.led_state.len()
+        );
+    } else {
+        let (frames, interval_ms) = render_composite_frames(state);
+        wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
+        // Don't poison led_state with rendered frame contents — it
+        // would cascade-corrupt subsequent set_effect calls (the
+        // animation's "middle" frame can be all-black depending on
+        // cycle parity, then the next zone sees a blank slice and
+        // re-seeds it with the mode's default color, looking like
+        // colors mysteriously reset). led_state stays as the
+        // unmodulated base colors that the composite paints from.
+        info!(
+            "Uploaded composite ({} animated zone(s)) to {device_id}: {} frames @ {}ms",
+            state.sub_zone_effects.len(),
+            frames.len(),
+            interval_ms
+        );
+    }
+    Ok(())
+}
+
 fn wireless_zone_slice(state: &WirelessRgbState, zone_idx: usize) -> Option<(usize, usize)> {
     if state.fan_type.is_rgb_only() {
         return if zone_idx == 0 {

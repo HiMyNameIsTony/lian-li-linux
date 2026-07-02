@@ -130,7 +130,9 @@ fn run_server(
             Ok((stream, addr)) => {
                 info!("OpenRGB client connected from {addr}");
                 stream.set_nonblocking(false).ok();
-                stream.set_read_timeout(Some(Duration::from_secs(300))).ok();
+                // Poll interval for stop_flag in read_packet, not an idle
+                // disconnect deadline — idle clients stay connected.
+                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
                 let rgb = Arc::clone(&rgb);
@@ -226,7 +228,25 @@ impl ClientHandler {
 
     fn read_packet(&mut self) -> anyhow::Result<(u32, u32, Vec<u8>)> {
         let mut header = [0u8; HEADER_SIZE];
-        self.stream.read_exact(&mut header)?;
+        // Idle clients (OpenRGB GUI sitting open) legitimately send nothing
+        // for long stretches. A read timeout only means "no traffic yet" —
+        // use it to poll stop_flag, never to drop the connection.
+        loop {
+            match self.stream.read_exact(&mut header) {
+                Ok(()) => break,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self.stop_flag.load(Ordering::Relaxed) {
+                        anyhow::bail!("server stopping");
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
 
         if &header[0..4] != MAGIC {
             anyhow::bail!("Invalid magic bytes");
@@ -401,9 +421,7 @@ impl ClientHandler {
         }
 
         let led_idx = u32::from_le_bytes(payload[0..4].try_into()?) as usize;
-        let r = payload[4];
-        let g = payload[5];
-        let b = payload[6];
+        let color = [payload[4], payload[5], payload[6]];
 
         if let Some(cap) = self.caps().get(dev_idx as usize) {
             let device_id = cap.device_id.clone();
@@ -411,10 +429,29 @@ impl ClientHandler {
             let mut offset = 0;
             for (zone_idx, count) in zones.iter().enumerate() {
                 if led_idx < offset + count {
-                    let colors = vec![[r, g, b]];
-                    self.direct_buffer
+                    let led_in_zone = led_idx - offset;
+                    let zone = zone_idx as u8;
+                    if self
+                        .direct_buffer
                         .lock()
-                        .set(device_id, zone_idx as u8, colors);
+                        .patch_led(&device_id, zone, led_in_zone, color)
+                    {
+                        break;
+                    }
+                    // No pending update to patch — seed from the device's
+                    // current state so the zone's other LEDs keep their colors.
+                    let colors = match self.rgb.lock().zone_colors(&device_id, zone) {
+                        Some(mut c) => {
+                            if let Some(px) = c.get_mut(led_in_zone) {
+                                *px = color;
+                            }
+                            c
+                        }
+                        // Wired devices don't cache LED state; keep the old
+                        // single-color send for them.
+                        None => vec![color],
+                    };
+                    self.direct_buffer.lock().set(device_id, zone, colors);
                     break;
                 }
                 offset += count;
@@ -450,14 +487,9 @@ impl ClientHandler {
                     "OpenRGB UpdateMode: device={device_id} mode_idx={mode_idx} -> {:?}",
                     effect.mode
                 );
-                for zone_idx in 0..cap.zones.len() {
-                    if let Err(e) = self
-                        .rgb
-                        .lock()
-                        .set_effect(&device_id, zone_idx as u8, &effect)
-                    {
-                        debug!("OpenRGB UpdateMode error for {device_id} zone {zone_idx}: {e}");
-                    }
+                let zones: Vec<u8> = (0..cap.zones.len() as u8).collect();
+                if let Err(e) = self.rgb.lock().set_effect_zones(&device_id, &zones, &effect) {
+                    debug!("OpenRGB UpdateMode error for {device_id}: {e}");
                 }
             }
         }
@@ -587,8 +619,25 @@ impl ClientHandler {
         let modes = self.build_modes(cap);
         // num_modes (u16)
         buf.extend_from_slice(&(modes.len() as u16).to_le_bytes());
-        // active_mode (i32) — default to 0 (first mode)
-        buf.extend_from_slice(&0i32.to_le_bytes());
+        // active_mode (i32) — what's actually running: an animated mode if
+        // one is applied, otherwise Direct (index 0; covers Static too, whose
+        // colors are baked into led_state). Keeps reconnecting clients from
+        // always seeing "Direct/white" regardless of device state.
+        let active_mode = self
+            .rgb
+            .lock()
+            .active_animated_mode(&cap.device_id)
+            .and_then(|mode| {
+                // Mirror build_modes ordering: Direct first, then
+                // supported_modes with Off/Direct skipped.
+                cap.supported_modes
+                    .iter()
+                    .filter(|m| !matches!(m, RgbMode::Off | RgbMode::Direct))
+                    .position(|m| *m == mode)
+                    .map(|p| (p + 1) as i32)
+            })
+            .unwrap_or(0);
+        buf.extend_from_slice(&active_mode.to_le_bytes());
         // mode data (no u16 prefix — count was already written above)
         for mode_buf in &modes {
             buf.extend_from_slice(mode_buf);
@@ -612,10 +661,31 @@ impl ClientHandler {
             }
         }
 
-        // colors (u16 count + 4 bytes each) — initialize to white
+        // colors (u16 count + 4 bytes each) — report the device's cached LED
+        // state so clients see reality on (re)connect. Wired devices don't
+        // cache state; fall back to white for them.
         buf.extend_from_slice(&(total_leds as u16).to_le_bytes());
-        for _ in 0..total_leds {
-            buf.extend_from_slice(&[255, 255, 255, 0]); // RGBA, A=0
+        {
+            let rgb = self.rgb.lock();
+            let mut written = 0usize;
+            for (zone_idx, zone) in cap.zones.iter().enumerate() {
+                let colors = rgb.zone_colors(&cap.device_id, zone_idx as u8);
+                for i in 0..zone.led_count as usize {
+                    if written >= total_leds {
+                        break;
+                    }
+                    let c = colors
+                        .as_ref()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or([255, 255, 255]);
+                    buf.extend_from_slice(&[c[0], c[1], c[2], 0]); // RGBA, A=0
+                    written += 1;
+                }
+            }
+            for _ in written..total_leds {
+                buf.extend_from_slice(&[255, 255, 255, 0]);
+            }
         }
 
         // Fill in data_size (everything after the data_size field itself)
