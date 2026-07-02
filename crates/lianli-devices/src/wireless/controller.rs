@@ -1,8 +1,9 @@
 use super::discovery::{poll_and_discover, DiscoveredDevice};
 use super::transport::{open_any, with_transport_recovery};
 use super::{
-    CMD_RESET, CMD_RX_LCD_MODE, CMD_RX_QUERY_34, CMD_RX_QUERY_37, CMD_VIDEO_START, RF_CHUNKS,
-    RF_CHUNK_SIZE, RF_DATA_SIZE, RF_SELECT, RX_IDS, TX_IDS, USB_CMD_GET_MAC, USB_CMD_SEND_RF,
+    CMD_GET_MAC_WAKE, CMD_RX_LCD_MODE, CMD_RX_QUERY_34, CMD_RX_QUERY_37, CMD_VIDEO_START,
+    RF_CHUNKS, RF_CHUNK_SIZE, RF_DATA_SIZE, RF_SAVE_CFG, RF_SELECT, RX_IDS, TX_IDS,
+    USB_CMD_GET_MAC, USB_CMD_RESET_ANOTHER, USB_CMD_SEND_RF,
 };
 use anyhow::{bail, Context, Result};
 use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
@@ -188,8 +189,8 @@ impl WirelessController {
         {
             let handle = tx.lock();
             handle
-                .write(&CMD_RESET, USB_TIMEOUT)
-                .context("sending TX reset")?;
+                .write(&CMD_GET_MAC_WAKE, USB_TIMEOUT)
+                .context("sending TX wake probe")?;
         }
 
         thread::sleep(Duration::from_millis(500));
@@ -232,7 +233,7 @@ impl WirelessController {
                         );
                         let handle = rx.lock();
                         let mut reset_cmd = vec![0u8; 64];
-                        reset_cmd[0] = 0x15; // USB_ResetAnother
+                        reset_cmd[0] = USB_CMD_RESET_ANOTHER;
                         if handle.write(&reset_cmd, USB_TIMEOUT).is_ok() {
                             let mut resp = [0u8; 64];
                             let _ = handle.read(&mut resp, Duration::from_millis(2000));
@@ -349,6 +350,114 @@ impl WirelessController {
         Ok(())
     }
 
+    /// Poll the TX dongle for liveness, mirroring L-Connect's 1 Hz
+    /// QuerryMasterMac. The GetMac reply carries the master MAC, firmware
+    /// version, and the dongle's TMOS system clock (0.625 ms ticks) —
+    /// returns that clock in ms. A clock that goes backwards between polls
+    /// means the dongle silently rebooted (USB brownout etc.) and likely
+    /// dropped RF state; callers should treat that as a recovery trigger.
+    pub fn query_master(&self) -> Result<u32> {
+        let tx = self.tx.as_ref().context("TX device not connected")?;
+        let channel = *self.master_channel.lock();
+
+        let mut cmd = vec![0u8; 64];
+        cmd[0] = USB_CMD_GET_MAC;
+        cmd[1] = channel;
+
+        let handle = tx.lock();
+        handle.read_flush();
+        handle
+            .write(&cmd, USB_TIMEOUT)
+            .context("sending GetMac liveness probe")?;
+        let mut resp = [0u8; 64];
+        let len = handle
+            .read(&mut resp, Duration::from_millis(500))
+            .context("reading GetMac liveness reply")?;
+        drop(handle);
+
+        if len < 13 || resp[0] != USB_CMD_GET_MAC {
+            bail!("unexpected GetMac reply (len={len}, cmd=0x{:02x})", resp[0]);
+        }
+
+        // Reply layout (L-Connect QuerryMasterMac): [1..7] master MAC,
+        // [7..11] TMOS clock BE, [11..13] firmware version BE.
+        let tmos = u32::from_be_bytes([resp[7], resp[8], resp[9], resp[10]]);
+        let clock_ms = (tmos as u64 * 5 / 8) as u32;
+
+        let reported = &resp[1..7];
+        if reported.iter().any(|&b| b != 0) {
+            let mut mac = self.master_mac.lock();
+            if *mac != *reported {
+                warn!(
+                    "Master MAC changed: {:02x?} -> {:02x?} (dongle re-paired?)",
+                    *mac, reported
+                );
+                mac.copy_from_slice(reported);
+            }
+        }
+
+        Ok(clock_ms)
+    }
+
+    /// Broadcast RF_SaveCfg: every bank persists its CURRENT lighting/fan
+    /// state to flash as its power-on default, so a later firmware reset
+    /// (idle watchdog, brownout) reverts to that state instead of factory
+    /// rainbow. Mirrors L-Connect's MasterDevice.SaveConfig — broadcast MAC
+    /// ff:…:ff / rx_type 0xFF, repeated `tries`× with 200 ms gaps.
+    ///
+    /// Callers are responsible for flash-friendly pacing (L-Connect: once
+    /// after 1 h, then every 3 h, only when effects have settled) and for
+    /// not persisting while a bank is drifted.
+    pub fn save_config(&self, tries: u8) -> Result<()> {
+        let master_mac = *self.master_mac.lock();
+        let master_ch = *self.master_channel.lock();
+
+        let mut rf_data = vec![0u8; RF_DATA_SIZE];
+        rf_data[0] = RF_SELECT;
+        rf_data[1] = RF_SAVE_CFG;
+        rf_data[2..8].copy_from_slice(&[0xFF; 6]);
+        rf_data[8..14].copy_from_slice(&master_mac);
+        rf_data[14] = 0xFF;
+
+        let tries = tries.max(1);
+        self.tx_recover(|handle| {
+            for attempt in 0..tries {
+                for chunk_idx in 0..RF_CHUNKS as u8 {
+                    let mut packet = vec![0u8; 64];
+                    packet[0] = USB_CMD_SEND_RF;
+                    packet[1] = chunk_idx;
+                    packet[2] = master_ch;
+                    packet[3] = 0xFF;
+
+                    let start = chunk_idx as usize * RF_CHUNK_SIZE;
+                    let end = start + RF_CHUNK_SIZE;
+                    packet[4..64].copy_from_slice(&rf_data[start..end]);
+
+                    handle
+                        .write(&packet, USB_TIMEOUT)
+                        .context("sending SaveCfg packet")?;
+                    thread::sleep(Duration::from_micros(100));
+                }
+                if attempt + 1 < tries {
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+            Ok(())
+        })?;
+
+        info!("Broadcast SaveCfg to wireless banks ({tries}x)");
+        Ok(())
+    }
+
+    /// When the most recent RGB upload (to any bank) was sent, if ever.
+    pub fn last_rgb_send(&self) -> Option<Instant> {
+        self.desired_effects
+            .lock()
+            .values()
+            .map(|(_, sent_at)| *sent_at)
+            .max()
+    }
+
     pub fn send_rx_sequence(&self) -> Result<()> {
         if let Some(rx) = &self.rx {
             for (cmd, capture) in [
@@ -386,10 +495,17 @@ impl WirelessController {
 
         if let Some(tx) = &self.tx {
             {
+                // Send the REAL dongle reset (USB_ResetAnother). This code
+                // used to send CMD_GET_MAC_WAKE here believing it was a
+                // reset — a read-only MAC query, so recovery was a placebo.
                 let handle = tx.lock();
-                if handle.write(&CMD_RESET, USB_TIMEOUT).is_err() {
+                let mut reset_cmd = vec![0u8; 64];
+                reset_cmd[0] = USB_CMD_RESET_ANOTHER;
+                if handle.write(&reset_cmd, USB_TIMEOUT).is_err() {
                     return false;
                 }
+                let mut resp = [0u8; 64];
+                let _ = handle.read(&mut resp, Duration::from_millis(2000));
             }
             self.video_mode_active.store(false, Ordering::Release);
             thread::sleep(Duration::from_millis(50));

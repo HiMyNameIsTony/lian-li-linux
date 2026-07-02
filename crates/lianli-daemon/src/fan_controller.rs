@@ -133,6 +133,13 @@ fn fan_control_thread(
     let mut fan_states: HashMap<usize, FanState> = HashMap::new();
     let mut calc_failures: HashMap<usize, u32> = HashMap::new();
 
+    // TX dongle liveness tracking (see query_master).
+    let mut dongle_clock_ms: Option<u32> = None;
+    let mut liveness_failures = 0u32;
+    // SaveCfg persistence pacing (see save_config).
+    let thread_start = Instant::now();
+    let mut last_save_cfg: Option<Instant> = None;
+
     let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
     for group in config.speeds.iter() {
         let is_mb_sync = group.speeds.iter().any(|s| s.is_mb_sync());
@@ -189,13 +196,61 @@ fn fan_control_thread(
         // spikes RPM. L-Connect sends this every second.
         if now.duration_since(last_heartbeat) >= heartbeat_interval {
             if let Some(ref w) = wireless {
+                // TX dongle liveness probe — L-Connect pairs one with every
+                // heartbeat. A clock that goes backwards means the dongle
+                // silently rebooted (and likely dropped RF state).
+                match w.query_master() {
+                    Ok(clock_ms) => {
+                        liveness_failures = 0;
+                        if let Some(prev) = dongle_clock_ms {
+                            if clock_ms < prev {
+                                warn!(
+                                    "TX dongle clock went backwards ({prev} ms -> {clock_ms} ms) — dongle rebooted?"
+                                );
+                            }
+                        }
+                        dongle_clock_ms = Some(clock_ms);
+                    }
+                    Err(err) => {
+                        liveness_failures += 1;
+                        if liveness_failures == 5 {
+                            warn!("TX dongle liveness probe failing: {err}");
+                        } else {
+                            debug!(
+                                "TX dongle liveness probe failed ({liveness_failures}x): {err}"
+                            );
+                        }
+                    }
+                }
+
                 if let Err(err) = w.send_master_clock() {
                     debug!("master clock send failed: {err}");
                 }
+
                 let drifted = w.drifted_macs();
-                if !drifted.is_empty() {
+                let drift_free = drifted.is_empty();
+                if !drift_free {
                     if let Some(ref tx) = daemon_tx {
                         tx.send(DaemonEvent::ResyncWirelessRgb { macs: drifted }).ok();
+                    }
+                }
+
+                // Persist bank state to flash on L-Connect's cadence so a
+                // firmware reset reverts to the user's colors, not factory
+                // rainbow. Only when RGB has settled and nothing is drifted
+                // (persisting a drifted bank would enshrine the rainbow).
+                let save_due = match last_save_cfg {
+                    None => thread_start.elapsed() >= SAVE_CFG_FIRST_AFTER,
+                    Some(t) => now.duration_since(t) >= SAVE_CFG_INTERVAL,
+                };
+                if save_due && drift_free {
+                    if let Some(sent) = w.last_rgb_send() {
+                        if now.duration_since(sent) >= SAVE_CFG_QUIET {
+                            match w.save_config(3) {
+                                Ok(()) => last_save_cfg = Some(now),
+                                Err(err) => debug!("SaveCfg broadcast failed: {err}"),
+                            }
+                        }
                     }
                 }
             }
@@ -394,6 +449,15 @@ fn apply_wireless_by_id(
         warn!("Fan group {group_idx}: wireless device {device_id} not discovered");
     }
 }
+
+/// SaveCfg persistence pacing, mirroring L-Connect's CheckSaveConfig:
+/// first persist 1 h after start, then every 3 h — flash-friendly while
+/// still catching the user's settled color choice within the session.
+const SAVE_CFG_FIRST_AFTER: Duration = Duration::from_secs(3600);
+const SAVE_CFG_INTERVAL: Duration = Duration::from_secs(3 * 3600);
+/// RGB must be quiet this long before persisting. Exceeds the drift-check
+/// echo grace window (40 s) so drift status is trustworthy at save time.
+const SAVE_CFG_QUIET: Duration = Duration::from_secs(45);
 
 /// EMA smoothing factor. Lower = smoother/slower response.
 /// 0.3 means ~70% of the smoothed value comes from history.

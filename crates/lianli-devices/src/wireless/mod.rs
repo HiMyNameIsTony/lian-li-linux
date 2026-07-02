@@ -38,9 +38,15 @@ pub fn tx_dongle_present() -> bool {
 
 const USB_CMD_SEND_RF: u8 = 0x10;
 const USB_CMD_GET_MAC: u8 = 0x11;
+/// USB_ResetAnother — the actual TX/RX dongle reset. L-Connect only fires
+/// this on hard recovery paths (stale handle after suspend/resume etc.).
+const USB_CMD_RESET_ANOTHER: u8 = 0x15;
 
 const RF_SELECT: u8 = 0x12;
 const RF_PWM_CMD: u8 = 0x10;
+/// RF_SaveCfg — a bank persists its current lighting/fan state to flash as
+/// its power-on default. Sent as a broadcast (MAC ff:…:ff, rx_type 0xFF).
+const RF_SAVE_CFG: u8 = 0x15;
 const RF_AIO_SWITCH_WIRELESS: u8 = 0x19;
 const RF_SET_RGB: u8 = 0x20;
 const RF_AIO_PARAMS: u8 = 0x21;
@@ -52,7 +58,11 @@ const RF_CHUNKS: usize = RF_DATA_SIZE / RF_CHUNK_SIZE;
 /// Size of the aio_param state block sent over RF to wireless AIOs.
 pub const AIO_PARAM_LEN: usize = 32;
 
-static CMD_RESET: Lazy<Vec<u8>> = Lazy::new(|| decode_command("11080000"));
+/// `USB_GetMac` on channel 8, fire-and-forget. Historically named CMD_RESET
+/// in this codebase, but the decompiled L-Connect enums show 0x11 is a
+/// read-only MAC/clock query — the real reset is [`USB_CMD_RESET_ANOTHER`].
+/// Kept at polling start as a harmless dongle wake/probe.
+static CMD_GET_MAC_WAKE: Lazy<Vec<u8>> = Lazy::new(|| decode_command("11080000"));
 static CMD_VIDEO_START: Lazy<Vec<u8>> = Lazy::new(|| decode_command("11010000"));
 static CMD_RX_QUERY_34: Lazy<Vec<u8>> = Lazy::new(|| decode_command("10010434"));
 static CMD_RX_QUERY_37: Lazy<Vec<u8>> = Lazy::new(|| decode_command("10010437"));
