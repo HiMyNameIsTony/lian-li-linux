@@ -21,12 +21,20 @@ use tracing::{debug, info, warn};
 use wireless::WirelessRgbState;
 
 /// Minimum interval between drift-triggered re-uploads of a bank's RGB state.
-/// The firmware takes 10–35 s (measured 2026-07-02 on SL-INF banks) to echo a
-/// freshly-sent effect_index back through discovery records, so drift stays
-/// flagged for a while after every send; the floor must exceed that window or
-/// the 1 Hz drift check would re-upload mid-settling, and without any floor
-/// it would re-upload full bank state every second.
-const WIRELESS_RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// Echo-latency false positives are already filtered upstream by the
+/// post-send grace window in `WirelessController::drifted_macs`, so any
+/// drift that reaches us is real; this floor only guards against an RF
+/// upload storm if a bank's firmware echoes garbage indefinitely.
+const WIRELESS_RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Header repeats for one-shot RGB uploads (mode changes, IPC direct sets,
+/// drift resyncs). The RF protocol has no acks; L-Connect's reliability
+/// strategy (2026-05 usbmon capture) is 8–12 header repeats at ~21 ms gaps
+/// (~200 ms per write). Our previous 2–4 repeats under-delivered on marginal
+/// links — partially-received uploads are the prime suspect for banks
+/// crashing back to firmware defaults ~1 min after an upload. The streaming
+/// direct-color path keeps low repeats: the next frame is the retry.
+const ONE_SHOT_HEADER_REPEATS: u8 = 8;
 
 pub struct RgbController {
     /// Wired RGB devices keyed by device_id.
@@ -265,7 +273,7 @@ impl RgbController {
             state.sub_zone_effects.remove(&zone);
 
             let idx = effect_index_from_state(&state.led_state);
-            wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
+            wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, ONE_SHOT_HEADER_REPEATS)?;
             return Ok(());
         }
 
@@ -807,14 +815,14 @@ fn upload_wireless_state(
     let idx = effect_index_from_state(&state.led_state);
 
     if state.sub_zone_effects.is_empty() {
-        wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 4)?;
+        wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, ONE_SHOT_HEADER_REPEATS)?;
         debug!(
             "Set wireless RGB on {device_id}: {} LEDs (no animation)",
             state.led_state.len()
         );
     } else {
         let (frames, interval_ms) = render_composite_frames(state);
-        wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, 4)?;
+        wireless.send_rgb_frames(&state.mac, &frames, interval_ms, &idx, ONE_SHOT_HEADER_REPEATS)?;
         // Don't poison led_state with rendered frame contents — it
         // would cascade-corrupt subsequent set_effect calls (the
         // animation's "middle" frame can be all-black depending on

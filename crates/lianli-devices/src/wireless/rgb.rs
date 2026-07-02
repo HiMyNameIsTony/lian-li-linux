@@ -161,7 +161,7 @@ impl WirelessController {
 
         self.desired_effects
             .lock()
-            .insert(device.mac, *effect_index);
+            .insert(device.mac, (*effect_index, std::time::Instant::now()));
 
         debug!(
             "Sent RGB to {} ({} frame(s), {} LEDs, {} compressed, {} packets, {}ms interval)",

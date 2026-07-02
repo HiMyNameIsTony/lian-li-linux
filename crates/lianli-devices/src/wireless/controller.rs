@@ -10,10 +10,18 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 const TX_FAILURE_THRESHOLD: u32 = 5;
+
+/// How long after an RGB send to suppress drift checks for that bank.
+/// The firmware takes 10–35 s (measured on SL-INF banks, 2026-07-02) to echo
+/// a freshly-sent effect_index back through discovery records; comparing
+/// during that window reads as spurious drift and would trigger a redundant
+/// re-upload after every send. Cost: a real firmware reset landing inside
+/// the window takes up to this long to detect.
+const RGB_ECHO_GRACE: Duration = Duration::from_secs(40);
 
 pub struct WirelessController {
     pub(super) tx: Option<Arc<Mutex<UsbTransport>>>,
@@ -28,7 +36,9 @@ pub struct WirelessController {
     /// 0xFFFF means unavailable/not yet read.
     pub(super) mobo_pwm: Arc<AtomicU16>,
     pub(super) tx_failures: Arc<AtomicU32>,
-    pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], [u8; 4]>>>,
+    /// Per-bank effect_index of the last RGB upload, plus when it was sent
+    /// (for the [`RGB_ECHO_GRACE`] window in [`Self::drifted_macs`]).
+    pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], ([u8; 4], Instant)>>>,
 }
 
 impl Clone for WirelessController {
@@ -398,22 +408,27 @@ impl WirelessController {
     /// lighting state (e.g. idle watchdog) and we should re-send that bank's
     /// RGB state.
     ///
-    /// Records with fan_count=0 are skipped: under heavy RF load the dongle
-    /// returns partially-zeroed device records (see set_fan_speeds_by_mac),
-    /// whose zeroed effect_index would read as spurious drift.
+    /// Two classes of false positive are filtered out:
+    /// - records with fan_count=0 (under heavy RF load the dongle returns
+    ///   partially-zeroed device records — see set_fan_speeds_by_mac — whose
+    ///   zeroed effect_index would read as spurious drift);
+    /// - banks sent to within [`RGB_ECHO_GRACE`] (the firmware's echo lags
+    ///   the send, so a fresh send always looks drifted for a while).
     pub fn drifted_macs(&self) -> Vec<[u8; 6]> {
         let desired = self.desired_effects.lock();
         if desired.is_empty() {
             return Vec::new();
         }
+        let now = Instant::now();
         let devices = self.discovered_devices.lock();
         devices
             .iter()
             .filter(|d| {
                 d.fan_count != 0
-                    && desired
-                        .get(&d.mac)
-                        .is_some_and(|want| d.effect_index != *want)
+                    && desired.get(&d.mac).is_some_and(|(want, sent_at)| {
+                        d.effect_index != *want
+                            && now.duration_since(*sent_at) >= RGB_ECHO_GRACE
+                    })
             })
             .map(|d| d.mac)
             .collect()
