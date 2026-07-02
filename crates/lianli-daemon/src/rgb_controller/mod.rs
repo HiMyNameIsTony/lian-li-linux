@@ -16,8 +16,17 @@ use lianli_shared::rgb::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use wireless::WirelessRgbState;
+
+/// Minimum interval between drift-triggered re-uploads of a bank's RGB state.
+/// The firmware takes 10–35 s (measured 2026-07-02 on SL-INF banks) to echo a
+/// freshly-sent effect_index back through discovery records, so drift stays
+/// flagged for a while after every send; the floor must exceed that window or
+/// the 1 Hz drift check would re-upload mid-settling, and without any floor
+/// it would re-upload full bank state every second.
+const WIRELESS_RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct RgbController {
     /// Wired RGB devices keyed by device_id.
@@ -32,6 +41,8 @@ pub struct RgbController {
     presets: Vec<lianli_shared::rgb::RgbPreset>,
     /// When true, OpenRGB has active control — suppress native config application.
     openrgb_active: bool,
+    /// Last drift-triggered resync per wireless bank, for rate limiting.
+    wireless_resync_at: HashMap<[u8; 6], Instant>,
 }
 
 impl RgbController {
@@ -64,6 +75,7 @@ impl RgbController {
             config: None,
             presets: Vec::new(),
             openrgb_active: false,
+            wireless_resync_at: HashMap::new(),
         }
     }
 
@@ -321,6 +333,55 @@ impl RgbController {
         }
 
         anyhow::bail!("RGB device not found: {device_id}");
+    }
+
+    /// Re-send the cached RGB state to wireless banks whose firmware reset
+    /// its lighting (drift detected via effect_index mismatch in discovery).
+    ///
+    /// Deliberately bypasses the openrgb_server / openrgb_active guards that
+    /// make `apply_config` a no-op for OpenRGB users: the cached `led_state`
+    /// is whatever was last applied, regardless of source, so re-sending it
+    /// is always the right recovery.
+    ///
+    /// Rate-limited per bank (`WIRELESS_RESYNC_MIN_INTERVAL`) because drift
+    /// stays flagged for 10–35 s after a send (firmware echo latency) and a
+    /// false positive would otherwise re-upload full bank state at 1 Hz.
+    /// Returns how many banks were actually re-sent.
+    pub fn resync_wireless_state(&mut self, macs: &[[u8; 6]]) -> usize {
+        let Some(ref wireless) = self.wireless else {
+            return 0;
+        };
+        let now = Instant::now();
+        let mut resent = 0;
+        for (device_id, state) in &self.wireless_state {
+            if !macs.contains(&state.mac) {
+                continue;
+            }
+            // Nothing has been applied to this bank yet (fresh daemon start);
+            // an all-black re-send would just turn its LEDs off.
+            if state.sub_zone_effects.is_empty()
+                && state.led_state.iter().all(|c| *c == [0, 0, 0])
+            {
+                continue;
+            }
+            let rate_limited = self
+                .wireless_resync_at
+                .get(&state.mac)
+                .is_some_and(|t| now.duration_since(*t) < WIRELESS_RESYNC_MIN_INTERVAL);
+            if rate_limited {
+                continue;
+            }
+            // Recorded even on failure so a wedged TX isn't hammered at 1 Hz.
+            self.wireless_resync_at.insert(state.mac, now);
+            match upload_wireless_state(wireless, state, device_id) {
+                Ok(()) => {
+                    resent += 1;
+                    info!("Re-sent cached RGB state to drifted bank {device_id}");
+                }
+                Err(e) => warn!("Failed to re-send RGB state to {device_id}: {e}"),
+            }
+        }
+        resent
     }
 
     /// Current colors of a wireless zone, from the cached full-bank LED state.

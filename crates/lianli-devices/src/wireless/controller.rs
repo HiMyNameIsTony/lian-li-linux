@@ -393,19 +393,30 @@ impl WirelessController {
         self.tx.is_some() && self.tx_failures.load(Ordering::Relaxed) < TX_FAILURE_THRESHOLD
     }
 
-    /// Returns true if any wireless device's currently-running effect_index
-    /// drifted away from what we last sent. Indicates the device firmware
-    /// reset its lighting state (e.g. idle watchdog) and we should re-apply.
-    pub fn rgb_drifted(&self) -> bool {
+    /// MACs of wireless devices whose currently-running effect_index drifted
+    /// away from what we last sent. Indicates the device firmware reset its
+    /// lighting state (e.g. idle watchdog) and we should re-send that bank's
+    /// RGB state.
+    ///
+    /// Records with fan_count=0 are skipped: under heavy RF load the dongle
+    /// returns partially-zeroed device records (see set_fan_speeds_by_mac),
+    /// whose zeroed effect_index would read as spurious drift.
+    pub fn drifted_macs(&self) -> Vec<[u8; 6]> {
         let desired = self.desired_effects.lock();
         if desired.is_empty() {
-            return false;
+            return Vec::new();
         }
         let devices = self.discovered_devices.lock();
-        devices.iter().any(|d| match desired.get(&d.mac) {
-            Some(want) => d.effect_index != *want,
-            None => false,
-        })
+        devices
+            .iter()
+            .filter(|d| {
+                d.fan_count != 0
+                    && desired
+                        .get(&d.mac)
+                        .is_some_and(|want| d.effect_index != *want)
+            })
+            .map(|d| d.mac)
+            .collect()
     }
 
     pub(super) fn tx_recover<F, R>(&self, op: F) -> Result<R>

@@ -21,7 +21,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use runtime::LcdBackend;
 
@@ -68,7 +68,11 @@ pub enum DaemonEvent {
     RecreateMedia {
         target_index: usize,
     },
-    ResyncWirelessRgb,
+    ResyncWirelessRgb {
+        /// Devices whose firmware-reported effect_index no longer matches
+        /// what we last sent (i.e. their lighting state was reset).
+        macs: Vec<[u8; 6]>,
+    },
     Shutdown, // SIGINT/SIGTERM received, exit the event loop cleanly
 }
 
@@ -477,9 +481,30 @@ impl ServiceManager {
                     // which worker has a new image to send?
                     self.stream_target(asset);
                 }
-                DaemonEvent::ResyncWirelessRgb => {
-                    info!("Wireless RGB drift detected, re-applying config");
-                    self.apply_rgb_config();
+                DaemonEvent::ResyncWirelessRgb { macs } => {
+                    // Don't route through apply_rgb_config: it returns early
+                    // when the OpenRGB server is enabled or an OpenRGB client
+                    // holds control, so drifted banks would never be restored
+                    // (they'd sit on firmware-default rainbow until a manual
+                    // re-set). Re-sending each bank's cached LED state is
+                    // source-agnostic — it restores whatever was last applied,
+                    // whether it came from native config or an OpenRGB client.
+                    if let Some(ref rgb) = self.rgb_controller {
+                        let resent = rgb.lock().resync_wireless_state(&macs);
+                        if resent > 0 {
+                            info!(
+                                "Wireless RGB drift detected on {} device(s), re-sent cached state to {resent}",
+                                macs.len()
+                            );
+                        } else {
+                            // Still drifted but within the per-bank resync
+                            // rate limit — stay quiet at INFO level.
+                            debug!(
+                                "Wireless RGB drift on {} device(s), resync rate-limited",
+                                macs.len()
+                            );
+                        }
+                    }
                 }
                 DaemonEvent::RecreateMedia { target_index } => {
                     if let Some(asset) = self.media_assets.get(&target_index).cloned() {

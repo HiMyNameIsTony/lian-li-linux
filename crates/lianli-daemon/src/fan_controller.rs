@@ -131,6 +131,7 @@ fn fan_control_thread(
     let mut temp_ema: HashMap<SensorSource, f32> = HashMap::new();
     let mut sensor_cache: HashMap<SensorSource, ResolvedSensor> = HashMap::new();
     let mut fan_states: HashMap<usize, FanState> = HashMap::new();
+    let mut calc_failures: HashMap<usize, u32> = HashMap::new();
 
     let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
     for group in config.speeds.iter() {
@@ -191,9 +192,10 @@ fn fan_control_thread(
                 if let Err(err) = w.send_master_clock() {
                     debug!("master clock send failed: {err}");
                 }
-                if w.rgb_drifted() {
+                let drifted = w.drifted_macs();
+                if !drifted.is_empty() {
                     if let Some(ref tx) = daemon_tx {
-                        tx.send(DaemonEvent::ResyncWirelessRgb).ok();
+                        tx.send(DaemonEvent::ResyncWirelessRgb { macs: drifted }).ok();
                     }
                 }
             }
@@ -263,10 +265,40 @@ fn fan_control_thread(
                 config.hysteresis_temp,
                 config.hysteresis_pwm,
             ) {
-                Ok(speeds) => speeds,
+                Ok(speeds) => {
+                    calc_failures.remove(&group_idx);
+                    speeds
+                }
                 Err(err) => {
-                    warn!("Fan speed calculation failed for group {group_idx}: {err}");
-                    continue;
+                    // Wireless banks revert to firmware-default speeds (brief
+                    // 100% blips / 0% drops) when PWM traffic goes quiet, so a
+                    // sensor outage must not starve the keepalive: hold the
+                    // last-known PWM instead of skipping the group.
+                    let failures = calc_failures.entry(group_idx).or_insert(0);
+                    *failures += 1;
+                    match fan_states.get(&group_idx) {
+                        Some(state) => {
+                            if *failures == 1 {
+                                warn!(
+                                    "Fan speed calculation failed for group {group_idx}: {err} — holding last PWM {:?}",
+                                    state.last_pwm
+                                );
+                            } else {
+                                debug!(
+                                    "Fan speed calculation still failing for group {group_idx} ({failures}x): {err}"
+                                );
+                            }
+                            state.last_pwm
+                        }
+                        None => {
+                            // No PWM ever computed for this group (e.g. right
+                            // after startup) — nothing safe to hold.
+                            if *failures == 1 {
+                                warn!("Fan speed calculation failed for group {group_idx}: {err}");
+                            }
+                            continue;
+                        }
+                    }
                 }
             };
 
