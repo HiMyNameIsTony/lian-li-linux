@@ -372,7 +372,10 @@ pub(super) fn poll_and_discover(
                                 return Some(old.clone());
                             }
                             if d.master_mac == local_mac && d.channel != master_ch {
-                                debug!(
+                                // trace: fires every poll for the duration of
+                                // a limbo episode; the actionable signal is
+                                // the fan controller's limbo-rescue warn.
+                                tracing::trace!(
                                     "{}: record channel {} != network channel {master_ch}, keeping cached",
                                     d.mac_str(),
                                     d.channel

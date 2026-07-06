@@ -141,6 +141,9 @@ fn fan_control_thread(
     let mut last_save_cfg: Option<Instant> = None;
     // Channel-0 limbo rescue pacing (see the limbo block in the heartbeat).
     let mut last_limbo_reform: Option<Instant> = None;
+    // Whether the previous rescue attempt in this limbo episode was a wake
+    // probe; the next attempt escalates to a dongle reset.
+    let mut limbo_tried_wake = false;
 
     let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
     for group in config.speeds.iter() {
@@ -258,15 +261,16 @@ fn fan_control_thread(
 
                 // Channel-0 limbo rescue: a bank stuck off-network hears
                 // nothing we send and fail-safes its fans to 100% until the
-                // master re-forms its network — which a dongle reset forces.
-                // (2026-07-05: a bank sat in this state for 30+ min; a daemon
-                // restart fixed it only because restarting re-forms.) Rate-
-                // limited so a genuinely dead bank can't reset-loop the
-                // healthy ones, which briefly drop off during a re-form.
+                // master re-admits it. The GetMac wake probe does that
+                // (validated live 2026-07-06: healed in ~15 s; a dongle
+                // reset fired earlier the same night and changed nothing —
+                // kept only as the escalation). Rate-limited so a genuinely
+                // dead bank can't churn the network forever.
                 let limbo = w.limbo_macs(LIMBO_RESCUE_AFTER);
-                if !limbo.is_empty()
-                    && last_limbo_reform
-                        .is_none_or(|t| now.duration_since(t) >= LIMBO_RESCUE_MIN_INTERVAL)
+                if limbo.is_empty() {
+                    limbo_tried_wake = false;
+                } else if last_limbo_reform
+                    .is_none_or(|t| now.duration_since(t) >= LIMBO_RESCUE_MIN_INTERVAL)
                 {
                     let macs: Vec<String> = limbo
                         .iter()
@@ -278,14 +282,21 @@ fn fan_control_thread(
                         })
                         .collect();
                     warn!(
-                        "{} bank(s) off-network (channel 0) for >{}s ({}) — forcing wireless network re-form",
+                        "{} bank(s) off-network (channel 0) for >{}s ({}) — sending network wake",
                         limbo.len(),
                         LIMBO_RESCUE_AFTER.as_secs(),
                         macs.join(", ")
                     );
                     last_limbo_reform = Some(now);
-                    if w.reset_dongle() {
-                        info!("TX dongle reset; waiting for banks to rejoin");
+                    if !limbo_tried_wake {
+                        limbo_tried_wake = true;
+                        if w.wake_network() {
+                            info!("sent network wake probe; waiting for bank(s) to rejoin");
+                        } else {
+                            warn!("network wake probe failed to send");
+                        }
+                    } else if w.reset_dongle() {
+                        info!("wake didn't re-admit bank(s); TX dongle reset as escalation");
                     } else {
                         warn!("TX dongle reset failed; limbo bank(s) may need a power cycle");
                     }
@@ -501,10 +512,11 @@ const SAVE_CFG_QUIET: Duration = Duration::from_secs(45);
 /// re-forms complete in a few seconds), short enough that a fail-safed bank
 /// isn't screaming at 100% for minutes.
 const LIMBO_RESCUE_AFTER: Duration = Duration::from_secs(45);
-/// Minimum gap between forced re-forms: each one briefly disrupts the
-/// healthy banks too, so a bank that never rejoins (dead / out of range)
-/// must not reset-loop the network.
-const LIMBO_RESCUE_MIN_INTERVAL: Duration = Duration::from_secs(600);
+/// Minimum gap between rescue attempts. The wake probe is non-disruptive
+/// (every daemon boot sends one while healthy banks keep running), but a
+/// bank that never rejoins (dead / out of range) must not churn the
+/// network with endless wake/reset cycles.
+const LIMBO_RESCUE_MIN_INTERVAL: Duration = Duration::from_secs(180);
 
 /// EMA smoothing factor. Lower = smoother/slower response.
 /// 0.3 means ~70% of the smoothed value comes from history.

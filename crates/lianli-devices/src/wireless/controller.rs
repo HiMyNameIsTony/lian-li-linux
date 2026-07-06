@@ -518,11 +518,31 @@ impl WirelessController {
         self.reset_dongle()
     }
 
+    /// Send the GetMac wake probe (0x11 0x08) that the connect path fires
+    /// before discovery. Empirically this is what re-admits banks stuck in
+    /// channel-0 limbo: a daemon restart (which sends it) healed a limbo
+    /// bank in ~15 s twice on 2026-07-05/06, while USB_ResetAnother fired
+    /// and changed nothing. Non-disruptive to healthy banks — every daemon
+    /// boot sends it while they keep running.
+    pub fn wake_network(&self) -> bool {
+        let Some(tx) = &self.tx else {
+            return false;
+        };
+        let handle = tx.lock();
+        handle.read_flush();
+        if handle.write(&CMD_GET_MAC_WAKE, USB_TIMEOUT).is_err() {
+            return false;
+        }
+        let mut resp = [0u8; 64];
+        let _ = handle.read(&mut resp, Duration::from_millis(500));
+        true
+    }
+
     /// Reset the connected TX dongle (USB_ResetAnother) and re-enter video
-    /// mode. Forces the master to re-form its wireless network — the remedy
-    /// for banks stuck in channel-0 limbo. Unlike [`Self::soft_reset`] this
-    /// does not attempt to (re)open the transport, so it works through a
-    /// shared reference (the fan-controller heartbeat holds an `Arc`).
+    /// mode. Escalation if [`Self::wake_network`] doesn't re-admit a limbo
+    /// bank. Unlike [`Self::soft_reset`] this does not attempt to (re)open
+    /// the transport, so it works through a shared reference (the
+    /// fan-controller heartbeat holds an `Arc`).
     pub fn reset_dongle(&self) -> bool {
         if let Some(tx) = &self.tx {
             {
