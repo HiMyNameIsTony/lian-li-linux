@@ -139,6 +139,8 @@ fn fan_control_thread(
     // SaveCfg persistence pacing (see save_config).
     let thread_start = Instant::now();
     let mut last_save_cfg: Option<Instant> = None;
+    // Channel-0 limbo rescue pacing (see the limbo block in the heartbeat).
+    let mut last_limbo_reform: Option<Instant> = None;
 
     let mut mb_sync_init: HashMap<String, HashMap<u8, bool>> = HashMap::new();
     for group in config.speeds.iter() {
@@ -251,6 +253,41 @@ fn fan_control_thread(
                                 Err(err) => debug!("SaveCfg broadcast failed: {err}"),
                             }
                         }
+                    }
+                }
+
+                // Channel-0 limbo rescue: a bank stuck off-network hears
+                // nothing we send and fail-safes its fans to 100% until the
+                // master re-forms its network — which a dongle reset forces.
+                // (2026-07-05: a bank sat in this state for 30+ min; a daemon
+                // restart fixed it only because restarting re-forms.) Rate-
+                // limited so a genuinely dead bank can't reset-loop the
+                // healthy ones, which briefly drop off during a re-form.
+                let limbo = w.limbo_macs(LIMBO_RESCUE_AFTER);
+                if !limbo.is_empty()
+                    && last_limbo_reform
+                        .is_none_or(|t| now.duration_since(t) >= LIMBO_RESCUE_MIN_INTERVAL)
+                {
+                    let macs: Vec<String> = limbo
+                        .iter()
+                        .map(|m| {
+                            format!(
+                                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                m[0], m[1], m[2], m[3], m[4], m[5]
+                            )
+                        })
+                        .collect();
+                    warn!(
+                        "{} bank(s) off-network (channel 0) for >{}s ({}) — forcing wireless network re-form",
+                        limbo.len(),
+                        LIMBO_RESCUE_AFTER.as_secs(),
+                        macs.join(", ")
+                    );
+                    last_limbo_reform = Some(now);
+                    if w.reset_dongle() {
+                        info!("TX dongle reset; waiting for banks to rejoin");
+                    } else {
+                        warn!("TX dongle reset failed; limbo bank(s) may need a power cycle");
                     }
                 }
             }
@@ -456,8 +493,18 @@ fn apply_wireless_by_id(
 const SAVE_CFG_FIRST_AFTER: Duration = Duration::from_secs(3600);
 const SAVE_CFG_INTERVAL: Duration = Duration::from_secs(3 * 3600);
 /// RGB must be quiet this long before persisting. Exceeds the drift-check
-/// echo grace window (40 s) so drift status is trustworthy at save time.
+/// echo grace window (10 s) so drift status is trustworthy at save time.
 const SAVE_CFG_QUIET: Duration = Duration::from_secs(45);
+
+/// How long a bound bank must sit in channel-0 limbo before we force a
+/// network re-form. Long enough to skip transient re-join windows (normal
+/// re-forms complete in a few seconds), short enough that a fail-safed bank
+/// isn't screaming at 100% for minutes.
+const LIMBO_RESCUE_AFTER: Duration = Duration::from_secs(45);
+/// Minimum gap between forced re-forms: each one briefly disrupts the
+/// healthy banks too, so a bank that never rejoins (dead / out of range)
+/// must not reset-loop the network.
+const LIMBO_RESCUE_MIN_INTERVAL: Duration = Duration::from_secs(600);
 
 /// EMA smoothing factor. Lower = smoother/slower response.
 /// 0.3 means ~70% of the smoothed value comes from history.

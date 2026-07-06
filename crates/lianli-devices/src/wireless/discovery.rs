@@ -3,11 +3,18 @@ use super::{WirelessFanType, RX_IDS, USB_CMD_SEND_RF};
 use anyhow::{bail, Context, Result};
 use lianli_transport::usb::{UsbTransport, USB_TIMEOUT};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
+
+/// Highest rx endpoint the bind flow will ever assign (see get_rx_unused).
+/// Anything above this in a device record is corruption, not a re-assignment
+/// (observed live 2026-07-02: rx=202 for 5 minutes under 60 fps RF load —
+/// every unicast to that bank was silently misaddressed).
+const RX_TYPE_MAX: u8 = 14;
 
 /// A wireless device discovered via the RX GetDev command.
 /// Parsed from the 42-byte device record in the response.
@@ -198,6 +205,9 @@ pub(super) fn poll_and_discover(
     discovered_devices: &Arc<Mutex<Vec<DiscoveredDevice>>>,
     mobo_pwm: &Arc<AtomicU16>,
     master_mac: &Arc<Mutex<[u8; 6]>>,
+    master_channel: &Arc<Mutex<u8>>,
+    pending_addr: &Arc<Mutex<HashMap<[u8; 6], (u8, u8)>>>,
+    limbo_since: &Arc<Mutex<HashMap<[u8; 6], Instant>>>,
 ) -> Result<()> {
     let mut cmd = vec![0u8; 64];
     cmd[0] = USB_CMD_SEND_RF;
@@ -283,6 +293,153 @@ pub(super) fn poll_and_discover(
 
             let mut devices = discovered_devices.lock();
             if !found.is_empty() {
+                // Master and banks share one RF channel, and the network can
+                // re-form on a different channel at runtime (interference
+                // hop, dongle reset — observed live 2026-07-02: ch 8 -> 2).
+                // Per-device sends follow the records automatically, but
+                // broadcasts (master-clock heartbeat, SaveCfg) use
+                // master_channel — left stale, the banks silently stop
+                // hearing the heartbeat and fail-safe/reset. Track it.
+                {
+                    let local_mac = *master_mac.lock();
+                    let mut bound = found.iter().filter(|d| d.master_mac == local_mac);
+                    if let Some(first) = bound.next() {
+                        let ch = first.channel;
+                        if bound.all(|d| d.channel == ch) {
+                            let mut master_ch = master_channel.lock();
+                            if *master_ch != ch {
+                                warn!(
+                                    "Wireless network moved: channel {} -> {ch} — updating broadcast channel",
+                                    *master_ch
+                                );
+                                *master_ch = ch;
+                            }
+                        }
+                    }
+                }
+                // Sanitize against the last-accepted records: under heavy RF
+                // load the dongle returns records with corrupt fields
+                // (fan_count=0 for 80 s, rx=202, ch=40 — observed 2026-07-02
+                // during a 60 fps stress run). Blindly adopting them starves
+                // banks of PWM keepalives (fan_count=0 skip guard) or
+                // misaddresses every unicast (RGB + PWM) until the next
+                // clean poll — banks then watchdog-reset. Rules:
+                //   - fan_count collapsing to 0 → keep the cached record;
+                //   - rx above RX_TYPE_MAX → keep the cached record;
+                //   - bound bank off the consensus network channel → cached;
+                //   - an otherwise valid rx/channel change → adopt only when
+                //     two consecutive polls agree (real re-forms persist;
+                //     one-poll glitches don't get to redirect traffic).
+                let found = {
+                    let local_mac = *master_mac.lock();
+                    let master_ch = *master_channel.lock();
+                    let mut pending = pending_addr.lock();
+                    let mut limbo = limbo_since.lock();
+                    found
+                        .into_iter()
+                        .filter_map(|d| {
+                            // Channel-0 limbo tracking happens on the RAW
+                            // record — the sanitizer below deliberately hides
+                            // ch=0 behind the cached copy, so the stored list
+                            // never shows it. Observed 2026-07-05: a bank sat
+                            // off-network at 100% fans for 30+ min, invisible.
+                            if d.master_mac == local_mac {
+                                if d.channel == 0 {
+                                    limbo.entry(d.mac).or_insert_with(Instant::now);
+                                } else {
+                                    limbo.remove(&d.mac);
+                                }
+                            }
+                            let Some(old) = devices.iter().find(|o| o.mac == d.mac) else {
+                                // First sighting: no baseline to fall back on,
+                                // accept unless the addressing is nonsense.
+                                return (d.rx_type <= RX_TYPE_MAX).then_some(d);
+                            };
+                            if d.fan_count == 0 && old.fan_count > 0 {
+                                debug!(
+                                    "{}: record lost its fans (fan_count=0), keeping cached",
+                                    d.mac_str()
+                                );
+                                return Some(old.clone());
+                            }
+                            if d.rx_type > RX_TYPE_MAX {
+                                debug!(
+                                    "{}: corrupt rx={} in record, keeping cached rx={}",
+                                    d.mac_str(),
+                                    d.rx_type,
+                                    old.rx_type
+                                );
+                                return Some(old.clone());
+                            }
+                            if d.master_mac == local_mac && d.channel != master_ch {
+                                debug!(
+                                    "{}: record channel {} != network channel {master_ch}, keeping cached",
+                                    d.mac_str(),
+                                    d.channel
+                                );
+                                return Some(old.clone());
+                            }
+                            let addr = (d.rx_type, d.channel);
+                            if addr != (old.rx_type, old.channel) {
+                                if pending.get(&d.mac) == Some(&addr) {
+                                    pending.remove(&d.mac);
+                                    return Some(d);
+                                }
+                                debug!(
+                                    "{}: unconfirmed addressing change rx={} ch={} -> rx={} ch={}, keeping cached until confirmed",
+                                    d.mac_str(),
+                                    old.rx_type,
+                                    old.channel,
+                                    d.rx_type,
+                                    d.channel
+                                );
+                                pending.insert(d.mac, addr);
+                                return Some(old.clone());
+                            }
+                            pending.remove(&d.mac);
+                            Some(d)
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                // RX-slot assignments can change when the network re-forms,
+                // and the master has been observed piling several banks onto
+                // one slot (2026-07-02: three banks on rx=0, two of which
+                // stopped receiving unicast RGB entirely). Log assignment
+                // changes; flag shared slots as a delivery-reliability risk.
+                {
+                    let local_mac = *master_mac.lock();
+                    let rx_map = |list: &[DiscoveredDevice]| {
+                        let mut m: Vec<([u8; 6], u8)> = list
+                            .iter()
+                            .filter(|d| d.master_mac == local_mac)
+                            .map(|d| (d.mac, d.rx_type))
+                            .collect();
+                        m.sort_unstable();
+                        m
+                    };
+                    let old_map = rx_map(&devices);
+                    let new_map = rx_map(&found);
+                    if !old_map.is_empty() && old_map != new_map {
+                        let desc = new_map
+                            .iter()
+                            .map(|(mac, rx)| {
+                                format!("{:02x}:{:02x}=rx{rx}", mac[0], mac[1])
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let mut slots: Vec<u8> =
+                            new_map.iter().map(|(_, rx)| *rx).collect();
+                        slots.sort_unstable();
+                        if slots.windows(2).any(|w| w[0] == w[1]) {
+                            warn!(
+                                "RX slot assignment changed: {desc} — banks share a slot, unicast delivery may be unreliable"
+                            );
+                        } else {
+                            info!("RX slot assignment changed: {desc}");
+                        }
+                    }
+                }
                 let old_count = devices.len();
                 *devices = found;
                 if old_count != devices.len() {

@@ -290,10 +290,15 @@ impl RgbController {
     ///
     /// For wired devices and rejected zones, falls back to per-zone calls.
     /// Returns the first error encountered, but attempts every zone.
+    /// `one_shot` selects delivery effort: an isolated apply (single click)
+    /// has no follow-up frame to paper over RF loss, so it gets the full
+    /// header-repeat treatment; mid-stream the next frame is the retry, so
+    /// repeats stay minimal to preserve airtime.
     pub fn apply_direct_zones(
         &mut self,
         device_id: &str,
         zones: &[(u8, Vec<[u8; 3]>)],
+        one_shot: bool,
     ) -> anyhow::Result<()> {
         if self.wired.contains_key(device_id) {
             // Wired path has no shared bank state — just delegate per-zone.
@@ -335,7 +340,8 @@ impl RgbController {
 
             if applied_any {
                 let idx = effect_index_from_state(&state.led_state);
-                wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, 2)?;
+                let repeats = if one_shot { ONE_SHOT_HEADER_REPEATS } else { 2 };
+                wireless.send_rgb_direct(&state.mac, &state.led_state, &idx, repeats)?;
             }
             return Ok(());
         }

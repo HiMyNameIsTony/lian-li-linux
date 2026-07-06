@@ -42,6 +42,9 @@ impl WirelessController {
                 &self.discovered_devices,
                 &self.mobo_pwm,
                 &self.master_mac,
+                &self.master_channel,
+                &self.pending_addr,
+                &self.limbo_since,
             );
 
             let observed = self

@@ -22,7 +22,10 @@ const TX_FAILURE_THRESHOLD: u32 = 5;
 /// during that window reads as spurious drift and would trigger a redundant
 /// re-upload after every send. Cost: a real firmware reset landing inside
 /// the window takes up to this long to detect.
-const RGB_ECHO_GRACE: Duration = Duration::from_secs(40);
+// At the 60 ms frame-loop interval the firmware refreshes its discovery-record
+// echo within ~10 s of a send (measured 2026-07-02; zero false positives all
+// day at 10 s). Shorter grace = faster rescue of a bank that missed a send.
+const RGB_ECHO_GRACE: Duration = Duration::from_secs(10);
 
 pub struct WirelessController {
     pub(super) tx: Option<Arc<Mutex<UsbTransport>>>,
@@ -40,6 +43,13 @@ pub struct WirelessController {
     /// Per-bank effect_index of the last RGB upload, plus when it was sent
     /// (for the [`RGB_ECHO_GRACE`] window in [`Self::drifted_macs`]).
     pub(super) desired_effects: Arc<Mutex<std::collections::HashMap<[u8; 6], ([u8; 4], Instant)>>>,
+    /// Per-bank unconfirmed (rx, channel) addressing change awaiting a second
+    /// consecutive poll before adoption (see poll_and_discover debounce).
+    pub(super) pending_addr: Arc<Mutex<std::collections::HashMap<[u8; 6], (u8, u8)>>>,
+    /// Bound banks whose raw discovery records report channel 0 (off-network
+    /// limbo: unreachable by any send, firmware fail-safe at 100% fans),
+    /// keyed to when limbo was first observed. See [`Self::limbo_macs`].
+    pub(super) limbo_since: Arc<Mutex<std::collections::HashMap<[u8; 6], Instant>>>,
 }
 
 impl Clone for WirelessController {
@@ -56,6 +66,8 @@ impl Clone for WirelessController {
             mobo_pwm: Arc::clone(&self.mobo_pwm),
             tx_failures: Arc::clone(&self.tx_failures),
             desired_effects: Arc::clone(&self.desired_effects),
+            pending_addr: Arc::clone(&self.pending_addr),
+            limbo_since: Arc::clone(&self.limbo_since),
         }
     }
 }
@@ -74,6 +86,8 @@ impl WirelessController {
             mobo_pwm: Arc::new(AtomicU16::new(0xFFFF)),
             tx_failures: Arc::new(AtomicU32::new(0)),
             desired_effects: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pending_addr: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            limbo_since: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -202,6 +216,9 @@ impl WirelessController {
         let discovered_devices = Arc::clone(&self.discovered_devices);
         let mobo_pwm = Arc::clone(&self.mobo_pwm);
         let master_mac = Arc::clone(&self.master_mac);
+        let master_channel = Arc::clone(&self.master_channel);
+        let pending_addr = Arc::clone(&self.pending_addr);
+        let limbo_since = Arc::clone(&self.limbo_since);
 
         let discovery_done = Arc::new(AtomicBool::new(false));
         let discovery_signal = discovery_done.clone();
@@ -213,9 +230,15 @@ impl WirelessController {
             let mut total_resets = 0u32;
             const MAX_RESETS: u32 = 3;
             while !stop_flag.load(Ordering::SeqCst) {
-                if let Err(err) =
-                    poll_and_discover(&rx, &discovered_devices, &mobo_pwm, &master_mac)
-                {
+                if let Err(err) = poll_and_discover(
+                    &rx,
+                    &discovered_devices,
+                    &mobo_pwm,
+                    &master_mac,
+                    &master_channel,
+                    &pending_addr,
+                    &limbo_since,
+                ) {
                     consecutive_errors += 1;
                     consecutive_successes = 0;
                     info!("RX polling ({consecutive_errors}): {err:?}, continuing");
@@ -492,7 +515,15 @@ impl WirelessController {
                 }
             }
         }
+        self.reset_dongle()
+    }
 
+    /// Reset the connected TX dongle (USB_ResetAnother) and re-enter video
+    /// mode. Forces the master to re-form its wireless network — the remedy
+    /// for banks stuck in channel-0 limbo. Unlike [`Self::soft_reset`] this
+    /// does not attempt to (re)open the transport, so it works through a
+    /// shared reference (the fan-controller heartbeat holds an `Arc`).
+    pub fn reset_dongle(&self) -> bool {
         if let Some(tx) = &self.tx {
             {
                 // Send the REAL dongle reset (USB_ResetAnother). This code
@@ -542,11 +573,36 @@ impl WirelessController {
             .filter(|d| {
                 d.fan_count != 0
                     && desired.get(&d.mac).is_some_and(|(want, sent_at)| {
-                        d.effect_index != *want
-                            && now.duration_since(*sent_at) >= RGB_ECHO_GRACE
+                        let drifted = d.effect_index != *want
+                            && now.duration_since(*sent_at) >= RGB_ECHO_GRACE;
+                        if drifted {
+                            debug!(
+                                "drift {}: want={:02x?} echoed={:02x?} cmd_seq={} sent {:.0?} ago",
+                                d.mac_str(),
+                                want,
+                                d.effect_index,
+                                d.cmd_seq,
+                                now.duration_since(*sent_at),
+                            );
+                        }
+                        drifted
                     })
             })
             .map(|d| d.mac)
+            .collect()
+    }
+
+    /// Bound banks stuck in channel-0 limbo for at least `min_age`.
+    /// Such a bank hears nothing we send (unicast or broadcast) and sits in
+    /// firmware fail-safe; the only software remedy is forcing the master to
+    /// re-form its network (see the fan controller's limbo rescue).
+    pub fn limbo_macs(&self, min_age: Duration) -> Vec<[u8; 6]> {
+        let now = Instant::now();
+        self.limbo_since
+            .lock()
+            .iter()
+            .filter(|(_, since)| now.duration_since(**since) >= min_age)
+            .map(|(mac, _)| *mac)
             .collect()
     }
 
