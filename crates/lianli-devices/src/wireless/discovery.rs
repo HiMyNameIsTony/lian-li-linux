@@ -11,9 +11,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Highest rx endpoint the bind flow will ever assign (see get_rx_unused).
-/// Anything above this in a device record is corruption, not a re-assignment
-/// (observed live 2026-07-02: rx=202 for 5 minutes under 60 fps RF load —
-/// every unicast to that bank was silently misaddressed).
+/// Anything above this in a device record is corruption, not a
+/// re-assignment — adopting it silently misaddresses every unicast.
 const RX_TYPE_MAX: u8 = 14;
 
 /// A wireless device discovered via the RX GetDev command.
@@ -270,9 +269,9 @@ pub(super) fn poll_and_discover(
 
                 // The master's own record (device_type 0xFF) is skipped by
                 // parse_device_record, but its byte 12 is the master's LIVE
-                // channel — the authoritative source (decompiled L-Connect
-                // reads it from exactly this record; the GetMac reply's
-                // channel is often stale, observed wrong in both directions).
+                // channel — the authoritative source (L-Connect reads it
+                // from this record; the GetMac reply's channel is often
+                // stale).
                 let rec = &response[offset..offset + 42];
                 if rec[41] == 0x1C && rec[18] == 0xFF && rec[0..6] == *master_mac.lock() {
                     let ch = rec[12];
@@ -314,12 +313,11 @@ pub(super) fn poll_and_discover(
             let mut devices = discovered_devices.lock();
             if !found.is_empty() {
                 // Master and banks share one RF channel, and the network can
-                // re-form on a different channel at runtime (interference
-                // hop, dongle reset — observed live 2026-07-02: ch 8 -> 2).
-                // Per-device sends follow the records automatically, but
-                // broadcasts (master-clock heartbeat, SaveCfg) use
-                // master_channel — left stale, the banks silently stop
-                // hearing the heartbeat and fail-safe/reset. Track it.
+                // re-form on a different channel at runtime. Per-device
+                // sends follow the records automatically, but broadcasts
+                // (master-clock heartbeat, SaveCfg) use master_channel —
+                // left stale, banks silently miss the heartbeat and
+                // fail-safe/reset.
                 {
                     let local_mac = *master_mac.lock();
                     let mut bound = found.iter().filter(|d| d.master_mac == local_mac);
@@ -339,11 +337,10 @@ pub(super) fn poll_and_discover(
                 }
                 // Sanitize against the last-accepted records: under heavy RF
                 // load the dongle returns records with corrupt fields
-                // (fan_count=0 for 80 s, rx=202, ch=40 — observed 2026-07-02
-                // during a 60 fps stress run). Blindly adopting them starves
-                // banks of PWM keepalives (fan_count=0 skip guard) or
-                // misaddresses every unicast (RGB + PWM) until the next
-                // clean poll — banks then watchdog-reset. Rules:
+                // (fan_count=0, garbage rx/channel). Blindly adopting them
+                // starves banks of PWM keepalives or misaddresses every
+                // unicast until the next clean poll — banks then
+                // watchdog-reset. Rules:
                 //   - fan_count collapsing to 0 → keep the cached record;
                 //   - rx above RX_TYPE_MAX → keep the cached record;
                 //   - bound bank off the consensus network channel → cached;
@@ -362,14 +359,11 @@ pub(super) fn poll_and_discover(
                             // bank fell off the network and sits unjoined.
                             // Adopt the raw record so sends address the bank
                             // where it actually is — the 1 Hz PWM keepalive
-                            // carries target rx/channel bytes (like
-                            // L-Connect's bind command, decompiled
-                            // SyncControlInfo) and re-admits it within
-                            // seconds. Hiding ch=0 behind the cached copy
-                            // redirected every send to a channel the bank
-                            // couldn't hear (2026-07-05: 30+ min at 100%
-                            // fans; only daemon restarts — which adopt the
-                            // raw record at first sighting — ever healed it).
+                            // carries target rx/channel bytes (L-Connect's
+                            // bind command) and re-admits it within seconds.
+                            // Hiding ch=0 behind the cached copy would
+                            // redirect every send to a channel the bank
+                            // can't hear.
                             if d.master_mac == local_mac {
                                 if d.channel == 0 {
                                     if let std::collections::hash_map::Entry::Vacant(e) =
@@ -448,10 +442,9 @@ pub(super) fn poll_and_discover(
                 };
 
                 // RX-slot assignments can change when the network re-forms,
-                // and the master has been observed piling several banks onto
-                // one slot (2026-07-02: three banks on rx=0, two of which
-                // stopped receiving unicast RGB entirely). Log assignment
-                // changes; flag shared slots as a delivery-reliability risk.
+                // and the master sometimes piles several banks onto one
+                // slot, degrading unicast delivery. Log assignment changes;
+                // flag shared slots.
                 {
                     let local_mac = *master_mac.lock();
                     let rx_map = |list: &[DiscoveredDevice]| {

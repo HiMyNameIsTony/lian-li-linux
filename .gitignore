@@ -13,3 +13,5 @@ dist/
 /capture-lianli.sh
 /captures/
 /analyze-capture.py
+/plan.md
+/openrgb-lighting-fixes-plan.md

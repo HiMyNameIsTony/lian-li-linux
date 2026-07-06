@@ -259,13 +259,12 @@ fn fan_control_thread(
                     }
                 }
 
-                // Channel-0 limbo rescue: a bank stuck off-network hears
-                // nothing we send and fail-safes its fans to 100% until the
-                // master re-admits it. The GetMac wake probe does that
-                // (validated live 2026-07-06: healed in ~15 s; a dongle
-                // reset fired earlier the same night and changed nothing —
-                // kept only as the escalation). Rate-limited so a genuinely
-                // dead bank can't churn the network forever.
+                // Channel-0 limbo last resort. Primary re-admission is
+                // passive: discovery adopts the raw ch=0 record and the 1 Hz
+                // PWM keepalive recalls the bank within seconds. Only if a
+                // bank still sits in limbo past the threshold do we try the
+                // wake probe, then a dongle reset. Rate-limited so a
+                // genuinely dead bank can't churn the network forever.
                 let limbo = w.limbo_macs(LIMBO_RESCUE_AFTER);
                 if limbo.is_empty() {
                     limbo_tried_wake = false;

@@ -19,13 +19,11 @@ impl WirelessController {
         for color in colors {
             raw_rgb.extend_from_slice(color);
         }
-        // 60 ms loop interval for the stored single frame, matching what
-        // L-Connect sends for solid colors (2026-05 captures). The interval
-        // costs no RF traffic — it's the firmware's internal redraw cadence —
-        // but the firmware appears to act on new uploads and refresh its
-        // discovery-record effect_index on loop boundaries, so a long
-        // interval (previously 5000 ms) meant seconds of visible swap lag
-        // and tens of seconds of echo lag.
+        // 60 ms frame-loop interval (L-Connect's value for solids). Costs no
+        // RF traffic — it's the firmware's internal redraw cadence — but the
+        // firmware acts on uploads and refreshes its effect_index echo on
+        // loop boundaries, so a long interval means seconds of swap lag and
+        // tens of seconds of echo lag.
         self.send_rgb_payload(mac, &raw_rgb, led_num, 1, 60, effect_index, header_repeats)
     }
 

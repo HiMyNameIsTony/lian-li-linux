@@ -15,11 +15,10 @@ use tracing::debug;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Guaranteed RF-idle gap after every flush cycle, even when the cycle ran
-/// longer than FLUSH_INTERVAL (flushing 4 banks takes ~36 ms, so a budget-
-/// only cap degrades to zero sleep and saturates the air). Keepalive
-/// packets submitted between uploads otherwise sit behind queued RGB in
-/// the dongle and arrive too late — measured live 2026-07-02: 112
-/// uploads/s back-to-back put every bank into fan fail-safe.
+/// longer than FLUSH_INTERVAL (a multi-bank flush can exceed the budget,
+/// and a budget-only cap then degrades to zero sleep). Without it,
+/// keepalives sit behind queued RGB in the dongle, arrive late, and banks
+/// hit fan fail-safe.
 const FLUSH_IDLE_FLOOR: Duration = Duration::from_millis(15);
 
 /// Buffers per-device, per-zone direct color updates for async flushing.
@@ -81,14 +80,12 @@ pub fn start_direct_color_writer(
         debug!("Direct color writer started");
 
         // Per-device timestamp of the last flush. A device not flushed
-        // within the last second is getting an isolated apply (a single
-        // click), not a frame in a stream — there is no follow-up frame to
-        // retry RF loss, so deliver it with full one-shot effort. Tracked
-        // per device because OpenRGB delivers a multi-device apply as
-        // separate messages across several flush cycles — a global
-        // timestamp let each bank's siblings downgrade it to stream effort
-        // (observed live 2026-07-02: only the first bank got one-shot
-        // delivery, and a 2-repeat sibling send was lost outright).
+        // within the last second is getting an isolated apply, not a stream
+        // frame — no follow-up frame will retry RF loss, so it gets full
+        // one-shot effort. Per device because OpenRGB splits a multi-device
+        // apply into separate messages across flush cycles; a global
+        // timestamp lets siblings downgrade each other to lossy stream
+        // effort.
         let mut last_flush: HashMap<String, Instant> = HashMap::new();
 
         loop {

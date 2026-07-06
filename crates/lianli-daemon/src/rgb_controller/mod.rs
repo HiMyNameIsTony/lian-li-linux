@@ -28,12 +28,10 @@ use wireless::WirelessRgbState;
 const WIRELESS_RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Header repeats for one-shot RGB uploads (mode changes, IPC direct sets,
-/// drift resyncs). The RF protocol has no acks; L-Connect's reliability
-/// strategy (2026-05 usbmon capture) is 8–12 header repeats at ~21 ms gaps
-/// (~200 ms per write). Our previous 2–4 repeats under-delivered on marginal
-/// links — partially-received uploads are the prime suspect for banks
-/// crashing back to firmware defaults ~1 min after an upload. The streaming
-/// direct-color path keeps low repeats: the next frame is the retry.
+/// drift resyncs). The RF protocol has no acks; L-Connect repeats the header
+/// 8–12× at ~21 ms gaps, and fewer repeats under-deliver on marginal links.
+/// The streaming direct-color path keeps low repeats: the next frame is the
+/// retry.
 const ONE_SHOT_HEADER_REPEATS: u8 = 8;
 
 pub struct RgbController {

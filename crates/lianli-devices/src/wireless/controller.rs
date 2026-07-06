@@ -16,15 +16,11 @@ use tracing::{debug, error, info, warn};
 
 const TX_FAILURE_THRESHOLD: u32 = 5;
 
-/// How long after an RGB send to suppress drift checks for that bank.
-/// The firmware takes 10–35 s (measured on SL-INF banks, 2026-07-02) to echo
-/// a freshly-sent effect_index back through discovery records; comparing
-/// during that window reads as spurious drift and would trigger a redundant
-/// re-upload after every send. Cost: a real firmware reset landing inside
-/// the window takes up to this long to detect.
-// At the 60 ms frame-loop interval the firmware refreshes its discovery-record
-// echo within ~10 s of a send (measured 2026-07-02; zero false positives all
-// day at 10 s). Shorter grace = faster rescue of a bank that missed a send.
+/// How long after an RGB send to suppress drift checks for that bank. The
+/// firmware refreshes its effect_index echo on frame-loop boundaries —
+/// within ~10 s at the 60 ms interval — so comparing sooner reads as
+/// spurious drift. Cost: a real reset inside the window takes up to this
+/// long to detect.
 const RGB_ECHO_GRACE: Duration = Duration::from_secs(10);
 
 pub struct WirelessController {
@@ -518,12 +514,12 @@ impl WirelessController {
         self.reset_dongle()
     }
 
-    /// Send the GetMac wake probe (0x11 0x08) that the connect path fires
-    /// before discovery. Empirically this is what re-admits banks stuck in
-    /// channel-0 limbo: a daemon restart (which sends it) healed a limbo
-    /// bank in ~15 s twice on 2026-07-05/06, while USB_ResetAnother fired
-    /// and changed nothing. Non-disruptive to healthy banks — every daemon
-    /// boot sends it while they keep running.
+    /// Send the GetMac probe the connect path fires before discovery
+    /// ("11 08" — byte 1 is a channel, per the decompiled QuerryMasterMac,
+    /// not a wake flag). Tested alone against a channel-0 limbo bank it did
+    /// NOT re-admit it — passive PWM re-admission in discovery is what heals
+    /// limbo — but it's harmless to healthy banks, so it stays as the first
+    /// last-resort rescue attempt.
     pub fn wake_network(&self) -> bool {
         let Some(tx) = &self.tx else {
             return false;
@@ -538,17 +534,14 @@ impl WirelessController {
         true
     }
 
-    /// Reset the connected TX dongle (USB_ResetAnother) and re-enter video
-    /// mode. Escalation if [`Self::wake_network`] doesn't re-admit a limbo
-    /// bank. Unlike [`Self::soft_reset`] this does not attempt to (re)open
-    /// the transport, so it works through a shared reference (the
-    /// fan-controller heartbeat holds an `Arc`).
+    /// Reset the connected TX dongle (USB_ResetAnother — a command the
+    /// vendor software defines but never sends) and re-enter video mode.
+    /// Last-ditch escalation of unproven value: tested once against a limbo
+    /// bank with no effect. Unlike [`Self::soft_reset`] it works through a
+    /// shared reference (the fan-controller heartbeat holds an `Arc`).
     pub fn reset_dongle(&self) -> bool {
         if let Some(tx) = &self.tx {
             {
-                // Send the REAL dongle reset (USB_ResetAnother). This code
-                // used to send CMD_GET_MAC_WAKE here believing it was a
-                // reset — a read-only MAC query, so recovery was a placebo.
                 let handle = tx.lock();
                 let mut reset_cmd = vec![0u8; 64];
                 reset_cmd[0] = USB_CMD_RESET_ANOTHER;
