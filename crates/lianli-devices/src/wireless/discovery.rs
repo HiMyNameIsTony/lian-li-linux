@@ -268,6 +268,26 @@ pub(super) fn poll_and_discover(
                     break;
                 }
 
+                // The master's own record (device_type 0xFF) is skipped by
+                // parse_device_record, but its byte 12 is the master's LIVE
+                // channel — the authoritative source (decompiled L-Connect
+                // reads it from exactly this record; the GetMac reply's
+                // channel is often stale, observed wrong in both directions).
+                let rec = &response[offset..offset + 42];
+                if rec[41] == 0x1C && rec[18] == 0xFF && rec[0..6] == *master_mac.lock() {
+                    let ch = rec[12];
+                    if ch != 0 {
+                        let mut master_ch = master_channel.lock();
+                        if *master_ch != ch {
+                            warn!(
+                                "Master dongle record reports channel {ch} (tracked {}) — following it",
+                                *master_ch
+                            );
+                            *master_ch = ch;
+                        }
+                    }
+                }
+
                 if let Some(device) = parse_device_record(&response[offset..offset + 42], idx as u8)
                 {
                     debug!(
@@ -338,16 +358,38 @@ pub(super) fn poll_and_discover(
                     found
                         .into_iter()
                         .filter_map(|d| {
-                            // Channel-0 limbo tracking happens on the RAW
-                            // record — the sanitizer below deliberately hides
-                            // ch=0 behind the cached copy, so the stored list
-                            // never shows it. Observed 2026-07-05: a bank sat
-                            // off-network at 100% fans for 30+ min, invisible.
+                            // Channel-0 is a real state, not corruption: the
+                            // bank fell off the network and sits unjoined.
+                            // Adopt the raw record so sends address the bank
+                            // where it actually is — the 1 Hz PWM keepalive
+                            // carries target rx/channel bytes (like
+                            // L-Connect's bind command, decompiled
+                            // SyncControlInfo) and re-admits it within
+                            // seconds. Hiding ch=0 behind the cached copy
+                            // redirected every send to a channel the bank
+                            // couldn't hear (2026-07-05: 30+ min at 100%
+                            // fans; only daemon restarts — which adopt the
+                            // raw record at first sighting — ever healed it).
                             if d.master_mac == local_mac {
                                 if d.channel == 0 {
-                                    limbo.entry(d.mac).or_insert_with(Instant::now);
-                                } else {
-                                    limbo.remove(&d.mac);
+                                    if let std::collections::hash_map::Entry::Vacant(e) =
+                                        limbo.entry(d.mac)
+                                    {
+                                        e.insert(Instant::now());
+                                        info!(
+                                            "{}: off-network (channel 0) — addressing keepalives to its limbo channel to re-admit it",
+                                            d.mac_str()
+                                        );
+                                    }
+                                    pending.remove(&d.mac);
+                                    return Some(d);
+                                }
+                                if limbo.remove(&d.mac).is_some() {
+                                    info!(
+                                        "{}: rejoined the network on channel {}",
+                                        d.mac_str(),
+                                        d.channel
+                                    );
                                 }
                             }
                             let Some(old) = devices.iter().find(|o| o.mac == d.mac) else {

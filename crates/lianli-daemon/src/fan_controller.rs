@@ -507,11 +507,13 @@ const SAVE_CFG_INTERVAL: Duration = Duration::from_secs(3 * 3600);
 /// echo grace window (10 s) so drift status is trustworthy at save time.
 const SAVE_CFG_QUIET: Duration = Duration::from_secs(45);
 
-/// How long a bound bank must sit in channel-0 limbo before we force a
-/// network re-form. Long enough to skip transient re-join windows (normal
-/// re-forms complete in a few seconds), short enough that a fail-safed bank
-/// isn't screaming at 100% for minutes.
-const LIMBO_RESCUE_AFTER: Duration = Duration::from_secs(45);
+/// How long a bound bank may sit in channel-0 limbo before the last-resort
+/// rescue fires. The primary re-admission is passive and fast: discovery
+/// adopts the raw ch=0 record, so the 1 Hz PWM keepalive (which carries
+/// target rx/channel like L-Connect's bind command) reaches the bank on its
+/// limbo channel and pulls it home within seconds. This threshold only
+/// matters if that mechanism fails.
+const LIMBO_RESCUE_AFTER: Duration = Duration::from_secs(120);
 /// Minimum gap between rescue attempts. The wake probe is non-disruptive
 /// (every daemon boot sends one while healthy banks keep running), but a
 /// bank that never rejoins (dead / out of range) must not churn the
